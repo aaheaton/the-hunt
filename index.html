@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0A0E14" />
+<title>The Hunt</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+<!-- HEADER (hidden on the safety/intro screen) -->
+<header class="app-header hidden" id="app-header">
+  <div class="brand">
+    <svg class="emblem" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="48" fill="#12161d" stroke="#000" stroke-width="1"/>
+      <line x1="50" y1="6" x2="50" y2="18" stroke="#00FF87" stroke-width="3"/>
+      <line x1="50" y1="82" x2="50" y2="94" stroke="#00FF87" stroke-width="3"/>
+      <line x1="6" y1="50" x2="18" y2="50" stroke="#00FF87" stroke-width="3"/>
+      <line x1="82" y1="50" x2="94" y2="50" stroke="#00FF87" stroke-width="3"/>
+      <circle cx="50" cy="50" r="30" fill="none" stroke="#00E5FF" stroke-width="2.5" stroke-dasharray="140 30"/>
+      <circle cx="50" cy="50" r="20" fill="none" stroke="#00FF87" stroke-width="2.5"/>
+      <circle cx="50" cy="50" r="6" fill="#00FF87"/>
+    </svg>
+    <div class="brand-text">
+      <div class="brand-row">
+        <span class="brand-name">THE HUNT</span>
+        <span class="level-tag" id="hdr-level">LVL 1</span>
+      </div>
+      <div class="status-row">
+        <span class="pulse-dot" id="hdr-gps-dot"></span>
+        <span class="status-text mono" id="hdr-status">GPS: ACQUIRING</span>
+      </div>
+    </div>
+  </div>
+  <div class="sector">
+    <span class="sector-label">SECTOR</span>
+    <span class="sector-value" id="hdr-sector">—</span>
+  </div>
+</header>
+
+<!-- SAFETY / INTRO SCREEN -->
+<section id="screen-safety" class="screen active">
+  <div class="intro-card">
+    <svg class="emblem-lg" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r="48" fill="#12161d" stroke="#000" stroke-width="1"/>
+      <line x1="50" y1="6" x2="50" y2="18" stroke="#00FF87" stroke-width="3"/>
+      <line x1="50" y1="82" x2="50" y2="94" stroke="#00FF87" stroke-width="3"/>
+      <line x1="6" y1="50" x2="18" y2="50" stroke="#00FF87" stroke-width="3"/>
+      <line x1="82" y1="50" x2="94" y2="50" stroke="#00FF87" stroke-width="3"/>
+      <circle cx="50" cy="50" r="30" fill="none" stroke="#00E5FF" stroke-width="2.5" stroke-dasharray="140 30"/>
+      <circle cx="50" cy="50" r="20" fill="none" stroke="#00FF87" stroke-width="2.5"/>
+      <circle cx="50" cy="50" r="6" fill="#00FF87"/>
+    </svg>
+    <h1>THE HUNT</h1>
+    <p class="tagline">// WHAT'S HIDING NEARBY?</p>
+    <div class="safety-box" id="safety-box"></div>
+    <button id="btn-start" class="btn btn-primary">Start Hunting</button>
+    <p id="permission-status" class="muted"></p>
+  </div>
+</section>
+
+<!-- SCANNER SCREEN (signal list + radar + telemetry, merged per design) -->
+<section id="screen-scanner" class="screen">
+  <div class="hud-card alert-banner">
+    <div class="glow-bg"></div>
+    <div class="alert-top">
+      <div style="display:flex;gap:10px;align-items:flex-start;min-width:0;">
+        <div class="alert-icon-wrap"><span class="pulse-dot" style="position:static;width:auto;height:auto;"></span><span id="alert-icon" style="font-size:18px;">◎</span></div>
+        <div style="min-width:0;">
+          <div class="alert-title-row">
+            <span class="label-caps tag">PROXIMITY LOCK</span>
+            <span class="freq mono" id="alert-freq">| FREQ: —</span>
+          </div>
+          <h2 class="headline-sm alert-headline" id="alert-headline">NO SIGNALS YET</h2>
+          <p class="alert-sub" id="alert-sub">Scanning for nearby activity…</p>
+        </div>
+      </div>
+      <span class="range-chip label-caps" id="alert-range">● SEARCHING</span>
+    </div>
+    <div class="gain-row">
+      <span class="mono uc" id="gain-label">SIGNAL GAIN [—]</span>
+      <span class="mono strong" id="gain-segs">0 / 8</span>
+    </div>
+    <div class="seg-meter" id="gain-meter"></div>
+  </div>
+
+  <div>
+    <div class="contact-tabs-head">
+      <span class="label-caps muted">ACTIVE CONTACTS IN SECTOR</span>
+      <span class="mono" style="color:var(--secondary-fixed-dim);font-size:11px;" id="contacts-count">0 ACTIVE</span>
+    </div>
+    <div class="contact-tabs" id="contact-tabs"></div>
+  </div>
+
+  <div class="radar-wrap">
+    <div class="radar-head">
+      <div class="bearing"><span>◇</span><span id="radar-bearing">BEARING: —</span></div>
+      <div class="sweepstate">SYS.SWEEP // ACTIVE</div>
+    </div>
+    <div class="radar-dial" id="radar-dial">
+      <svg class="sweep" viewBox="0 0 240 240" style="position:absolute;inset:0;">
+        <defs>
+          <radialGradient id="sweepGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#00FF87" stop-opacity="0.35"/>
+            <stop offset="85%" stop-color="#00FF87" stop-opacity="0.08"/>
+            <stop offset="100%" stop-color="#00FF87" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <circle cx="120" cy="120" r="112" fill="none" stroke="#262A31" stroke-width="1.5" stroke-dasharray="4 4"/>
+        <circle cx="120" cy="120" r="76" fill="none" stroke="#262A31" stroke-width="1.5"/>
+        <circle cx="120" cy="120" r="40" fill="none" stroke="#262A31" stroke-width="1.5" stroke-dasharray="2 4"/>
+        <line x1="120" y1="8" x2="120" y2="232" stroke="#31353C" stroke-width="1"/>
+        <line x1="8" y1="120" x2="232" y2="120" stroke="#31353C" stroke-width="1"/>
+        <path d="M 120 120 L 120 8 A 112 112 0 0 1 199 41 Z" fill="url(#sweepGrad)"/>
+      </svg>
+      <div class="radar-cardinal"><span class="n">N</span><span>S</span></div>
+      <div class="radar-cardinal-h"><span>W</span><span>E</span></div>
+      <div id="radar-blip-layer"></div>
+      <div class="radar-center"><svg id="radar-center-arrow" class="icon" viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 20 L12 16 L5 20 Z" fill="currentColor"/></svg></div>
+    </div>
+    <div class="radar-readout">
+      <div class="dist-row"><span class="dist-num" id="radar-distance">—</span><span class="dist-unit">METRES</span></div>
+      <div class="radius-row">ESTIMATED SEARCH RADIUS: <strong id="radar-radius">± —</strong></div>
+    </div>
+    <div class="status-pill" id="scanner-status">AWAITING GPS LOCK</div>
+  </div>
+
+  <div class="hud-card telemetry-card">
+    <div class="telemetry-head">
+      <div class="title-row"><span>🧬</span><h3 class="label-caps" style="color:var(--primary-container);margin:0;">BEHAVIOUR TELEMETRY</h3></div>
+      <span class="ver">SYS.VER 1.0</span>
+    </div>
+    <div id="clue-list"></div>
+  </div>
+
+  <button id="btn-goto-capture" class="btn btn-primary" disabled>
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.4"/><circle cx="12" cy="12" r="1" fill="currentColor"/></svg>
+    <span id="goto-capture-label">Get closer to capture</span>
+  </button>
+  <div class="safety-line">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12Z" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.5"/></svg>
+    <span class="txt">LOOK UP // REMAIN AWARE OF REAL-WORLD SURROUNDINGS</span>
+  </div>
+</section>
+
+<!-- MAP SCREEN -->
+<section id="screen-map" class="screen no-pad">
+  <div style="padding:76px 16px 0;">
+    <div class="map-viewport" id="map-viewport">
+      <svg viewBox="0 0 300 300" id="map-svg"></svg>
+      <div class="map-hud-top">
+        <div class="map-chip"><span class="l">MAP ENGINE // LOCAL</span><span class="v" id="map-coords">—</span></div>
+        <div class="map-chip" style="align-items:flex-end;"><span class="l">ACTIVE SIGNALS</span><span class="v" id="map-signal-count">0</span></div>
+      </div>
+      <div class="map-controls">
+        <button class="map-fab" id="map-recenter" title="Recenter"><svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+        <button class="map-fab" id="map-north" title="Align north"><svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M12 3v18M7 8l5-5 5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </div>
+      <div id="map-zone-cards"></div>
+      <div class="map-empty-note hidden" id="map-empty-note">NO ACTIVE SIGNALS IN RANGE // MOVE TO REFRESH SWEEP</div>
+    </div>
+  </div>
+  <div style="padding:14px 16px 96px;display:flex;flex-direction:column;gap:12px;">
+    <div class="filter-row" id="map-filters"></div>
+    <div>
+      <div class="label-caps muted" style="margin-bottom:8px;">SESSION TELEMETRY</div>
+      <div class="stats-grid">
+        <div class="stat-tile"><div class="st-val" id="stat-active">0</div><div class="st-label">Signals Active</div></div>
+        <div class="stat-tile"><div class="st-val" id="stat-distance">0m</div><div class="st-label">This Session</div></div>
+        <div class="stat-tile"><div class="st-val" id="stat-lifetime">0m</div><div class="st-label">Lifetime Walked</div></div>
+      </div>
+    </div>
+    <a href="#" class="btn btn-outline" id="map-engage-btn">
+      <svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 3"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>
+      ENGAGE TACTICAL SCANNER
+    </a>
+  </div>
+</section>
+
+<!-- CAPTURE / AR SCREEN -->
+<section id="screen-capture" class="screen">
+  <div class="safety-line" style="justify-content:flex-start;">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12Z" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="2.5" stroke="currentColor" stroke-width="1.5"/></svg>
+    <span class="txt">LOOK UP — CHECK SURROUNDINGS BEFORE YOU AIM</span>
+  </div>
+
+  <div class="ar-viewport" id="ar-viewport">
+    <video id="ar-video" autoplay playsinline muted></video>
+    <div class="scrim"></div>
+
+    <div class="ar-top-row">
+      <span class="ar-chip" id="ar-fps-chip">FPS: —</span>
+      <button class="ar-mode-btn" id="ar-fallback-btn">SONAR MODE</button>
+    </div>
+
+    <div class="ar-proximity-banner hidden" id="ar-proximity-banner">
+      <span class="danger-dot"></span>
+      <span class="txt" id="ar-proximity-text">TARGET VERY CLOSE</span>
+    </div>
+
+    <div class="ar-target-zone">
+      <div id="ar-no-target" class="no-camera-note">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" style="width:32px;height:32px;"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <p>No target selected. Pick a contact on the Scanner tab and get within range.</p>
+      </div>
+      <div id="ar-target" class="ar-target hidden">
+        <div class="glow1"></div>
+        <div class="glow2"></div>
+        <div class="orb"><span class="icon" id="ar-target-glyph">◆</span><img id="ar-target-art" class="orb-art" alt="" /></div>
+        <div class="reticle-ring">
+          <svg viewBox="0 0 160 160">
+            <circle cx="80" cy="80" r="70" fill="none" stroke="#00FF87" stroke-opacity="0.6" stroke-width="1.5" stroke-dasharray="16 10"/>
+            <circle cx="80" cy="80" r="54" fill="none" stroke="#00E5FF" stroke-opacity="0.8" stroke-width="1" stroke-dasharray="6 8"/>
+            <line x1="80" y1="2" x2="80" y2="18" stroke="#00FF87" stroke-width="2"/>
+            <line x1="80" y1="142" x2="80" y2="158" stroke="#00FF87" stroke-width="2"/>
+            <line x1="2" y1="80" x2="18" y2="80" stroke="#00FF87" stroke-width="2"/>
+            <line x1="142" y1="80" x2="158" y2="80" stroke="#00FF87" stroke-width="2"/>
+          </svg>
+        </div>
+        <div class="lock-tag">
+          <svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>
+          <span id="ar-lock-readout">LOCK-ON: 0%</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="ar-lower-row">
+      <div class="ar-meta-card hidden" id="ar-meta-card">
+        <div class="name-row"><span class="name" id="ar-meta-name">—</span><span class="badge" id="ar-meta-rarity"></span></div>
+        <span class="sub" id="ar-meta-sub">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="fallback-toggle-row">
+    <div class="ft-left">
+      <svg class="ft-icon" viewBox="0 0 24 24" fill="none" style="width:20px;height:20px;"><path d="M2 12h4l2-7 4 14 2-9 2 5h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div>
+        <div class="ft-title">No-AR Sensor Fallback</div>
+        <div class="ft-sub">Capture using compass &amp; proximity instead of camera</div>
+      </div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="ar-fallback-toggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <button id="btn-capture" class="btn btn-primary" disabled>
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="currentColor" fill-opacity="0.15"/></svg>
+    <span id="capture-btn-label">Get closer to capture</span>
+  </button>
+
+  <div class="capture-success-banner hidden" id="capture-success-banner">
+    <div class="cs-left">
+      <div class="cs-icon">✓</div>
+      <div>
+        <div class="cs-tag" id="cs-tag">CONTAINMENT SYNCHRONIZED</div>
+        <div class="cs-name" id="cs-name">—</div>
+        <div class="cs-sub" id="cs-sub">—</div>
+      </div>
+    </div>
+    <button class="cs-btn" id="cs-view-btn">VIEW</button>
+  </div>
+</section>
+
+<!-- JOURNAL SCREEN -->
+<section id="screen-journal" class="screen">
+  <div class="glass-card dossier-head">
+    <div class="glow-corner"></div>
+    <div class="dossier-top-row">
+      <span class="tag label-caps"><svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M4 5.5C4 4.67 4.67 4 5.5 4H12v16H5.5A1.5 1.5 0 0 1 4 18.5V5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M20 5.5c0-.83-.67-1.5-1.5-1.5H12v16h6.5c.83 0 1.5-.67 1.5-1.5V5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg> FIELD DOSSIER</span>
+      <span class="dossier-tier" id="dossier-tier">EXPLORER</span>
+    </div>
+    <div class="progress-row">
+      <span class="label-caps muted">COLLECTION PROGRESS</span>
+      <span><span class="p-num" id="journal-found">0</span> <span class="p-of">/ <span id="journal-total">0</span> DISCOVERED</span></span>
+    </div>
+    <div class="seg-meter" id="journal-progress-meter" style="margin-top:6px;"></div>
+    <div class="rarity-chip-row" id="rarity-breakdown"></div>
+  </div>
+
+  <div id="featured-card-wrap"></div>
+
+  <div>
+    <div class="contact-tabs-head">
+      <span class="label-caps" style="display:flex;align-items:center;gap:6px;"><svg class="icon" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/></svg> ALL SPECIMENS</span>
+    </div>
+    <div class="specimen-grid" id="specimen-grid"></div>
+  </div>
+
+  <button class="btn btn-ghost" id="btn-export-log">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 17v2.5A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5V17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    Export Field Log (.json)
+  </button>
+</section>
+
+<!-- JOURNAL ENTRY MODAL -->
+<div id="journal-modal" class="modal hidden">
+  <div class="modal-card">
+    <button id="btn-close-journal" class="btn-icon modal-close" aria-label="Close">✕</button>
+    <div id="journal-content"></div>
+  </div>
+</div>
+
+<footer class="toast hidden" id="lookup-toast">👀 LOOK UP — CHECK YOUR SURROUNDINGS</footer>
+
+<nav class="app-nav hidden" id="app-nav">
+  <button class="nav-item active" data-screen="scanner">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 3"/><path d="M12 12 L12 3 A9 9 0 0 1 18.5 6.5 Z" fill="currentColor" fill-opacity="0.25"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>
+    <span class="label">Scanner</span>
+  </button>
+  <button class="nav-item" data-screen="map">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>
+    <span class="label">Map</span>
+  </button>
+  <button class="nav-item" data-screen="capture">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4" stroke="currentColor" stroke-width="1.5"/></svg>
+    <span class="label">Capture</span>
+  </button>
+  <button class="nav-item" data-screen="journal">
+    <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M4 5.5C4 4.67 4.67 4 5.5 4H12v16H5.5A1.5 1.5 0 0 1 4 18.5V5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M20 5.5c0-.83-.67-1.5-1.5-1.5H12v16h6.5c.83 0 1.5-.67 1.5-1.5V5.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+    <span class="label">Journal</span>
+  </button>
+</nav>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
