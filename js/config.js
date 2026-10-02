@@ -5,7 +5,7 @@
 export const CONFIG = {
   // How far out a new signal can spawn from the player when a hunt starts.
   spawnMinDistanceM: 60,
-  spawnMaxDistanceM: 260,
+  spawnMaxDistanceM: 450,
 
   // The "search zone" a character wanders inside — its true position is
   // never the exact spawn point, it's randomized within this radius of it.
@@ -15,14 +15,17 @@ export const CONFIG = {
   // Scanner Level 1 range (see GDD section 24) — signals outside this
   // radius aren't detected at all yet. Also doubles as the Map screen's
   // radar view radius, so the map and scanner always agree on "in range".
-  scannerRangeM: 300,
+  scannerRangeM: 500,
 
   // Distance thresholds that change what the scanner shows.
   veryCloseM: 20,
   captureRangeM: 12,
 
   // How many simultaneous signals the player can have active at once.
-  maxActiveSignals: 3,
+  // The actual target is re-rolled between min and max each time the
+  // list is refilled (e.g. after a capture), so the map feels less uniform.
+  minActiveSignals: 3,
+  maxActiveSignals: 7,
 
   // How often (ms) "Wanderer" characters take a small random step.
   wanderTickMs: 8000,
@@ -38,6 +41,11 @@ export const CONFIG = {
   // Real (not fake) light progression: one Hunter Level per this many
   // total captures, purely cosmetic, never gates anything.
   capturesPerHunterLevel: 5,
+
+  // CARTO basemaps API key (removes the "API key required" watermark on
+  // map tiles). Note: this ships in client-side code, so anyone can see
+  // it — restrict it to your domain in the CARTO dashboard if possible.
+  cartoApiKey: 'cb1_47ck_1_a859aa438149c792359ba97e',
 
   // localStorage keys.
   storage: {

@@ -1,7 +1,7 @@
 // Minimal app-shell service worker: makes the prototype installable and
 // gives it basic offline resilience. Not doing anything clever with
 // runtime caching yet — that's a later-stage concern.
-const CACHE_NAME = 'the-hunt-v4';
+const CACHE_NAME = 'the-hunt-v8';
 const APP_SHELL = [
   './',
   './index.html',
@@ -15,6 +15,9 @@ const APP_SHELL = [
   './js/storage.js',
   './js/ui.js',
   './js/icons.js',
+  './js/livemap.js',
+  './js/vendor/leaflet.js',
+  './css/leaflet.css',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -79,6 +82,9 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  // Map tiles (and anything else cross-origin) go straight to the network
+  // so the app-shell cache doesn't grow without limit.
+  if (new URL(event.request.url).origin !== self.location.origin) return;
   // Network-first for navigations so the player always gets fresh game
   // logic when online; cache fallback keeps it launchable offline.
   event.respondWith(

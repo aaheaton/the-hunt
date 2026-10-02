@@ -7,6 +7,7 @@ import { distanceM, bearingDeg } from './geo.js';
 import { speciesById } from './characters.js';
 import { requestOrientationPermission, watchPosition, watchHeading } from './sensors.js';
 import { wanderTick, refillSignals } from './spawner.js';
+import { recenterLiveMap } from './livemap.js';
 import {
   evolveSpecies,
   recordCapture,
@@ -245,7 +246,7 @@ function onPositionUpdate(pos) {
       state.currentSignalId = state.activeSignals[0].id;
       state.huntStartPos = state.playerPos;
     }
-    goToScreen('scanner');
+    goToScreen('map');
   } else {
     tick();
   }
@@ -315,6 +316,7 @@ function wireEvents() {
   // Map controls.
   document.getElementById('map-recenter').addEventListener('click', (e) => {
     e.currentTarget.classList.add('active');
+    recenterLiveMap(state.playerPos);
     refreshCurrentScreen();
     setTimeout(() => e.currentTarget.classList.remove('active'), 400);
   });

@@ -58,9 +58,12 @@ export function wanderTick(signals) {
   }
 }
 
-/** Top up the active signal list to CONFIG.maxActiveSignals. */
+/** Top up the active signal list to a random target between
+ *  CONFIG.minActiveSignals and CONFIG.maxActiveSignals (inclusive). */
 export function refillSignals(activeSignals, playerPos) {
-  while (activeSignals.length < CONFIG.maxActiveSignals) {
+  const { minActiveSignals: min, maxActiveSignals: max } = CONFIG;
+  const target = min + Math.floor(Math.random() * (max - min + 1));
+  while (activeSignals.length < target) {
     activeSignals.push(spawnSignal(playerPos));
   }
   return activeSignals;

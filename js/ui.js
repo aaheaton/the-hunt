@@ -3,6 +3,7 @@
 
 import { CONFIG } from './config.js';
 import { RARITY, SPECIES, speciesById, formFor, maxStage } from './characters.js';
+import { renderLiveMap } from './livemap.js';
 import { getCollection, getJournal, hunterLevel, totalDiscoveredSpeciesCount, evolutionStatus } from './storage.js';
 
 const screens = {
@@ -280,66 +281,23 @@ export function renderMapFilters() {
 }
 
 export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetimeDistanceM) {
-  const svg = document.getElementById('map-svg');
-  const viewSize = 300;
-  const center = viewSize / 2;
-  const maxR = center - 20;
-  const h = mapNorthUp ? 0 : heading || 0;
-
   const visible = signals.filter((s) => mapFilter === 'all' || speciesById(s.speciesId).rarity === mapFilter);
 
-  let svgInner = `
-    <rect width="${viewSize}" height="${viewSize}" fill="#0A0E14"/>
-    <defs>
-      <pattern id="tacgrid" width="30" height="30" patternUnits="userSpaceOnUse">
-        <path d="M30 0 L0 0 0 30" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="1"/>
-      </pattern>
-    </defs>
-    <rect width="${viewSize}" height="${viewSize}" fill="url(#tacgrid)"/>
-    <circle cx="${center}" cy="${center}" r="${maxR}" fill="none" stroke="#262A31" stroke-width="1.5" stroke-dasharray="4 4"/>
-    <circle cx="${center}" cy="${center}" r="${maxR * 0.66}" fill="none" stroke="#262A31" stroke-width="1"/>
-    <circle cx="${center}" cy="${center}" r="${maxR * 0.33}" fill="none" stroke="#262A31" stroke-width="1" stroke-dasharray="2 4"/>
-  `;
-
-  for (const sig of visible) {
-    const species = speciesById(sig.speciesId);
-    const relative = ((sig._bearingDeg - h + 360) % 360);
-    const rad = (relative - 90) * (Math.PI / 180);
-    const rPx = Math.min(maxR - 10, (sig._distanceM / CONFIG.scannerRangeM) * maxR);
-    const zonePxRadius = Math.max(10, (CONFIG.searchZoneRadiusM / CONFIG.scannerRangeM) * maxR);
-    const x = center + rPx * Math.cos(rad);
-    const y = center + rPx * Math.sin(rad);
-    const color = getComputedColorForRarity(species.rarity);
-    svgInner += `
-      <circle cx="${x}" cy="${y}" r="${zonePxRadius}" fill="${color}" fill-opacity="0.08" stroke="${color}" stroke-opacity="0.55" stroke-dasharray="3 4"/>
-      <circle cx="${x}" cy="${y}" r="${zonePxRadius * 0.4}" fill="${color}" fill-opacity="0.18"/>
-      <circle cx="${x}" cy="${y}" r="5" fill="${color}"/>
-    `;
-  }
-
-  // Player position + heading cone (always shown at true relative orientation).
-  const coneAngle = mapNorthUp ? heading || 0 : 0;
-  const coneRad = (coneAngle - 90) * (Math.PI / 180);
-  const coneLen = 34;
-  const cx1 = center + coneLen * Math.cos(coneRad - 0.35);
-  const cy1 = center + coneLen * Math.sin(coneRad - 0.35);
-  const cx2 = center + coneLen * Math.cos(coneRad + 0.35);
-  const cy2 = center + coneLen * Math.sin(coneRad + 0.35);
-  svgInner += `
-    <path d="M ${center} ${center} L ${cx1} ${cy1} A ${coneLen} ${coneLen} 0 0 1 ${cx2} ${cy2} Z" fill="#00E5FF" fill-opacity="0.12"/>
-    <circle cx="${center}" cy="${center}" r="10" fill="#00E5FF" fill-opacity="0.25">
-      <animate attributeName="r" dur="2.4s" repeatCount="indefinite" values="6;16;6"/>
-      <animate attributeName="opacity" dur="2.4s" repeatCount="indefinite" values="0.7;0.1;0.7"/>
-    </circle>
-    <circle cx="${center}" cy="${center}" r="5" fill="#00E5FF" stroke="#0A0E14" stroke-width="1.5"/>
-  `;
-
-  svg.innerHTML = svgInner;
+  // Real street map with the player's live GPS position (see livemap.js).
+  renderLiveMap(
+    visible.map((s) => ({ ...s, _rarity: speciesById(s.speciesId).rarity })),
+    playerPos,
+    heading,
+    mapNorthUp,
+    getComputedColorForRarity
+  );
 
   document.getElementById('map-signal-count').textContent = String(visible.length);
   document.getElementById('map-coords').textContent = playerPos
-    ? `${playerPos.lat.toFixed(3)}, ${playerPos.lng.toFixed(3)}`
-    : '—';
+    ? `${playerPos.lat.toFixed(5)}, ${playerPos.lng.toFixed(5)}`
+    : 'ACQUIRING GPS…';
+  document.getElementById('map-accuracy').textContent =
+    playerPos && playerPos.accuracy ? `±${Math.round(playerPos.accuracy)}m` : '';
   document.getElementById('map-empty-note').classList.toggle('hidden', visible.length > 0);
   document.getElementById('map-north').classList.toggle('active', !mapNorthUp);
 
