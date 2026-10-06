@@ -18,7 +18,8 @@ let rotatorEl = null;
 let playerMarker = null;
 let accuracyCircle = null;
 let rangeRing = null;
-const signalLayers = new Map(); // sig.id -> { zone, core, dot }
+const signalLayers = new Map(); // sig.id -> { zone, core, dot, beacon? }
+const hiddenState = new Map();  // sig.id -> bool (last rendered hidden state)
 let following = true; // auto-pan to the player until they drag the map
 let lastSize = '';
 
@@ -146,11 +147,16 @@ export function renderLiveMap(signals, playerPos, heading, northUp, colorFor) {
     const p = [sig.pos.lat, sig.pos.lng];
     let layers = signalLayers.get(sig.id);
     if (!layers) {
+      const leg = sig.legendary ? ' zone-legendary' : '';
       layers = {
-        zone: L.circle(p, { radius: CONFIG.searchZoneRadiusM, color, weight: 1.2, opacity: 0.6, dashArray: '3 4', fillColor: color, fillOpacity: 0.1 }),
-        core: L.circle(p, { radius: CONFIG.searchZoneRadiusM * 0.4, stroke: false, fillColor: color, fillOpacity: 0.2, interactive: false }),
-        dot: L.circleMarker(p, { radius: 5, stroke: false, fillColor: color, fillOpacity: 1 }),
+        zone: L.circle(p, { radius: CONFIG.searchZoneRadiusM, color, weight: sig.legendary ? 2 : 1.2, opacity: 0.6, dashArray: '3 4', fillColor: color, fillOpacity: 0.1, className: 'sig-zone' + leg }),
+        core: L.circle(p, { radius: CONFIG.searchZoneRadiusM * 0.4, stroke: false, fillColor: color, fillOpacity: 0.2, interactive: false, className: 'sig-core' + leg }),
+        dot: L.circleMarker(p, { radius: sig.legendary ? 7 : 5, stroke: false, fillColor: color, fillOpacity: 1, className: 'sig-dot' + leg }),
       };
+      if (sig.legendary) {
+        // Expanding beacon rings so a legendary signal reads as an event.
+        layers.beacon = L.circle(p, { radius: CONFIG.searchZoneRadiusM * 2.2, color, weight: 2, opacity: 0.9, fill: false, interactive: false, className: 'sig-beacon' });
+      }
       const select = () => window.__theHuntSelectSignal?.(sig.id, true);
       layers.zone.on('click', select);
       layers.dot.on('click', select);
@@ -159,11 +165,21 @@ export function renderLiveMap(signals, playerPos, heading, northUp, colorFor) {
     } else {
       Object.values(layers).forEach((l) => l.setLatLng(p));
     }
+    // A hiding creature drops off the scanner: fade its zone, hide its dot.
+    const hidden = !!sig._hidden;
+    if (hiddenState.get(sig.id) !== hidden) {
+      hiddenState.set(sig.id, hidden);
+      layers.zone.setStyle({ opacity: hidden ? 0.2 : 0.6, fillOpacity: hidden ? 0.03 : 0.1 });
+      layers.core.setStyle({ fillOpacity: hidden ? 0 : 0.2 });
+      layers.dot.setStyle({ fillOpacity: hidden ? 0 : 1 });
+      if (layers.beacon) layers.beacon.setStyle({ opacity: hidden ? 0 : 0.9 });
+    }
   }
   for (const [id, layers] of signalLayers) {
     if (!seen.has(id)) {
       Object.values(layers).forEach((l) => l.remove());
       signalLayers.delete(id);
+      hiddenState.delete(id);
     }
   }
 }

@@ -44,6 +44,7 @@ export const SPECIES = [
     rarity: 'common',
     behavior: 'stationary',
     habitat: 'urban',
+    spawnHabitats: ['urban', 'any'],
     lore: 'A household spirit of Slavic folklore. It keeps the hearth lit and the home safe — for those who leave it bread.',
     clues: ['It smells of woodsmoke.', 'It likes homes and hearths.', 'Something small is keeping watch.'],
     evolution: line('domovoy', [
@@ -58,6 +59,7 @@ export const SPECIES = [
     rarity: 'common',
     behavior: 'stationary',
     habitat: 'trees',
+    spawnHabitats: ['trees', 'any'],
     lore: 'A wolf-headed man of Shetland legend. Gentle despite its looks — it leaves fish on the windowsills of the poor.',
     clues: ['It likes wild, open ground.', 'Something left a fish behind.', 'It sits very still.'],
     evolution: line('wulver', [
@@ -70,10 +72,11 @@ export const SPECIES = [
     id: 'leprechaun',
     name: 'The Leprechaun',
     rarity: 'uncommon',
-    behavior: 'wanderer',
+    behavior: 'hider',
     habitat: 'trees',
+    spawnHabitats: ['trees'],
     lore: 'A solitary Irish fairy-cobbler with a buried crock of gold. Catch his eye and he cannot vanish — look away and he is gone.',
-    clues: ['It likes old roots and hollows.', 'You hear a tiny hammer tapping.', 'It never stays in one place.'],
+    clues: ['It likes old roots and hollows.', 'You hear a tiny hammer tapping.', 'Rush it and it vanishes.'],
     evolution: line('leprechaun', [
       ['Barrow Cobbler', 1, 'Hunched among the roots of an ancient tree, stitching a single shoe beside a smouldering pipe and a small clay pot.'],
       ['Gold Warden', 3, 'A hooded wanderer in leather and bandoliers, lantern lit, guarding the path to a hoard only he can find.'],
@@ -86,6 +89,8 @@ export const SPECIES = [
     rarity: 'uncommon',
     behavior: 'wanderer',
     habitat: 'night',
+    nightOnly: true,
+    spawnHabitats: ['water', 'trees'],
     lore: 'A drowned river-spirit of Slavic legend. On moonlit nights she sits in the willows, singing travellers towards the water.',
     clues: ['It was detected after dark.', 'Faint singing, somewhere close.', 'The willows lean towards it.'],
     evolution: line('rusalka', [
@@ -100,6 +105,7 @@ export const SPECIES = [
     rarity: 'rare',
     behavior: 'stationary',
     habitat: 'water',
+    spawnHabitats: ['water'],
     lore: 'A serpent spirit of the sacred rivers of South and South-East Asian myth — guardian of springs, temples and hidden treasure.',
     clues: ['It likes water.', 'Something is coiled and waiting.', 'The air smells of rain and lotus.'],
     evolution: line('naga', [
@@ -112,8 +118,9 @@ export const SPECIES = [
     id: 'blue-men',
     name: 'Blue Men of the Minch',
     rarity: 'epic',
-    behavior: 'wanderer',
+    behavior: 'runner',
     habitat: 'water',
+    spawnHabitats: ['water'],
     lore: 'Storm-kin of the Scottish straits. They rise beside passing ships and challenge sailors to finish a rhyme — or be sunk.',
     clues: ['It likes the water.', 'The wind is picking up.', 'You hear a half-finished rhyme.'],
     evolution: line('blue-men', [
@@ -126,8 +133,10 @@ export const SPECIES = [
     id: 'hollow-hart',
     name: 'Hollow Hart',
     rarity: 'legendary',
-    behavior: 'wanderer',
+    behavior: 'runner',
     habitat: 'night',
+    nightOnly: true,
+    spawnHabitats: ['woods', 'trees'],
     lore: 'Nobody agrees on what it is. Hunters speak of bone-white antlers in the deep woods, and of the silence that follows them.',
     clues: ['It was detected after dark.', 'Every bird has gone silent.', 'Something enormous is moving.'],
     evolution: line('hollow-hart', [
@@ -153,13 +162,24 @@ export function maxStage(species) {
   return species?.evolution ? species.evolution.length : 1;
 }
 
-/** Weighted-random species pick from the spawnable (non-locked) pool. */
-export function rollSpecies() {
-  const pool = SPECIES.filter((s) => !s.locked);
-  const total = pool.reduce((sum, s) => sum + RARITY[s.rarity].weight, 0);
+/** Species that can spawn right now: night-only species need darkness. */
+export function spawnableSpecies({ night = false } = {}) {
+  return SPECIES.filter((s) => !s.locked && (!s.nightOnly || night));
+}
+
+/**
+ * Weighted-random species pick (by rarity weight). Night-only species get a
+ * boost once it's dark so the night actually feels different.
+ * @param {Array} pool        candidate species (default: everything spawnable now)
+ * @param {number} nightBoost weight multiplier for night-only species
+ */
+export function rollSpecies(pool = spawnableSpecies(), nightBoost = 1) {
+  if (!pool.length) return null;
+  const w = (s) => RARITY[s.rarity].weight * (s.nightOnly ? nightBoost : 1);
+  const total = pool.reduce((sum, s) => sum + w(s), 0);
   let roll = Math.random() * total;
   for (const s of pool) {
-    roll -= RARITY[s.rarity].weight;
+    roll -= w(s);
     if (roll <= 0) return s;
   }
   return pool[0];

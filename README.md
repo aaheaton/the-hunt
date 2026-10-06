@@ -61,10 +61,9 @@ hardcoded "LVL 14" tag. Rather than fake those, this build:
 
 ## What's deliberately NOT in this build yet
 
-Real map tiles/POI data, true AR anchoring (this uses camera passthrough
+True AR anchoring (this uses camera passthrough
 + a screen-space reticle, not spatial tracking), a real backend/spawn
-engine, accounts, trading, evolution, weather/social/legendary behaviors,
-multiplayer. See GDD §49 "Product Development Roadmap" for the intended
+engine, accounts, trading, weather/social behaviours, multiplayer. See GDD §49 "Product Development Roadmap" for the intended
 order.
 
 ## Running it locally (desktop testing)
@@ -108,7 +107,11 @@ css/styles.css       Tactical Field HUD theme — tokens, typography, all compon
 js/config.js         all tunable gameplay constants (ranges, thresholds, timings)
 js/geo.js            haversine distance, bearing, point projection, coord fuzzing
 js/characters.js     species catalog, rarity table, clue pools
-js/spawner.js        signal creation, wander drift, respawn-to-fill logic
+js/spawner.js        signal creation (terrain + night aware), wander drift, refill
+js/terrain.js        OpenStreetMap (Overpass) terrain: safe-spot + habitat checks
+js/behaviours.js     Runner / Hider / night-fade / legendary-expiry logic
+js/sun.js            sun altitude → is it dark yet? (no network)
+js/livemap.js        Leaflet street map on the Map tab
 js/sensors.js        GPS + compass wrappers, iOS permission handling
 js/storage.js        localStorage collection/journal + lifetime distance + export
 js/icons.js          small inline-SVG icon set (no icon-font network dependency)
@@ -130,7 +133,10 @@ how often clues reveal — is in `js/config.js`.
 
 Per GDD §39: only approximate (rounded to ~100m) discovery locations
 are ever stored, never a continuous GPS trail, and everything stays
-on-device — nothing is uploaded anywhere in this prototype.
+on-device. The one thing that leaves the phone: to place creatures
+safely, the app asks the public OpenStreetMap Overpass API for parks,
+paths, water and roads around you, sending a location **rounded to ~100m**
+(never your exact position, never a trail).
 
 ## Creature roster, art & evolution (updated 2026-10-01)
 
@@ -153,3 +159,40 @@ Wild spawns are always stage 1. Evolve from the species' Journal dossier once
 the capture count is met. Saved data for removed species is ignored.
 To add a creature: drop its 3 images into `assets/creatures/` with the naming
 above, add an entry to `SPECIES` in `js/characters.js`, and list the files in `sw.js`.
+
+
+## Behaviours, night creatures & real-world spawns (updated 2026-10-06)
+
+**Behaviours (GDD §7)** — tune all numbers in `js/config.js`:
+
+| Species | Behaviour | Spawns in | When |
+|---|---|---|---|
+| Domovoy | Stationary | Footpaths (urban) | Any time |
+| The Wulver | Stationary | Parks / green space | Any time |
+| The Leprechaun | **Hider** — vanishes for 15–30s at 22m, reappears on the far side of its zone (2 times) | Parks | Any time |
+| Rusalka | Wanderer | Water banks, else parks | **Night only** |
+| Naga | Stationary | Water banks | Any time |
+| Blue Men of the Minch | **Runner** — bolts 30–50m away at 25m (2 times, then "too tired") | Water banks | Any time |
+| Hollow Hart | **Runner**, legendary **event** | Woodland, else parks | **Night only** |
+
+- **Night** = sun more than 6° below the horizon at your real position
+  (civil dusk, `nightSunAltitudeDeg`). Night species spawn ×2 more often
+  after dark and fade out at dawn.
+- **Hollow Hart event:** full-screen "LEGENDARY SIGNAL" alert with a
+  vibration pattern, a beacon on the map, red legendary scanner styling and
+  a 30-minute countdown — then the signal fades. Max one at a time.
+
+**Real-world spawns (GDD §11, §26).** On the first GPS fix the app loads
+OpenStreetMap data within 800m (refreshed after you move 300m). Creatures
+can only sit on public footpaths/pedestrian areas or inside public green
+space, and never: in water, within a buffer of roads (4–30m by road type)
+or railways, inside schools, playgrounds, cemeteries, golf courses,
+industrial/military/construction sites, or anything tagged private.
+Species are only offered if their habitat exists nearby, so no water
+nearby means no water creatures. If Overpass can't be reached the game
+falls back to random placement and warns the player.
+
+**Testing switches** (add to the URL):
+`?night=1` / `?night=0` force night/day · `?spawn=hollow-hart` (or any
+species id) forces the first spawn · `?debug=1` exposes game state as
+`window.__theHuntState` in the console.

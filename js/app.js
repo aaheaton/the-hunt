@@ -7,6 +7,9 @@ import { distanceM, bearingDeg } from './geo.js';
 import { speciesById } from './characters.js';
 import { requestOrientationPermission, watchPosition, watchHeading } from './sensors.js';
 import { wanderTick, refillSignals } from './spawner.js';
+import { ensureTerrain, terrainStatus } from './terrain.js';
+import { updateBehaviours, isHidden } from './behaviours.js';
+import { isNight } from './sun.js';
 import { recenterLiveMap } from './livemap.js';
 import {
   evolveSpecies,
@@ -29,6 +32,9 @@ const state = {
   currentScreen: 'safety',
   arStream: null,
   arFallback: false,
+  night: false,
+  terrainAnnounced: false,
+  spawnsStarted: false,
 };
 
 let stopWatchingPosition = null;
@@ -43,9 +49,12 @@ function revealCluesFor(sig) {
   const species = speciesById(sig.speciesId);
   const thresholds = [150, 80, 30];
   thresholds.forEach((thresh, i) => {
-    if (sig._distanceM <= thresh && sig.revealedClues.length <= i) {
-      const clue = species.clues[i];
-      if (clue && !sig.revealedClues.includes(clue)) sig.revealedClues.push(clue);
+    const clue = species.clues[i];
+    if (clue && sig._distanceM <= thresh && !sig.revealedClues.includes(clue)) {
+      // Keep species clues in order ahead of any behaviour notes.
+      const firstExtra = sig.revealedClues.findIndex((c) => !species.clues.includes(c));
+      if (firstExtra === -1) sig.revealedClues.push(clue);
+      else sig.revealedClues.splice(firstExtra, 0, clue);
     }
   });
 }
@@ -53,7 +62,97 @@ function revealCluesFor(sig) {
 function recomputeSignal(sig) {
   sig._distanceM = distanceM(state.playerPos, sig.pos);
   sig._bearingDeg = bearingDeg(state.playerPos, sig.pos);
-  revealCluesFor(sig);
+  sig._hidden = isHidden(sig);
+  if (!sig._hidden) revealCluesFor(sig);
+}
+
+/* ------------------------------------------------------------------ */
+/* Spawning (terrain-aware, night-aware)                               */
+/* ------------------------------------------------------------------ */
+
+/** Top up signals and announce any legendary arrivals. */
+function topUpSignals() {
+  if (!state.playerPos || !state.spawnsStarted) return;
+  state.night = isNight(state.playerPos);
+  const added = refillSignals(state.activeSignals, state.playerPos, { night: state.night });
+  if (!state.currentSignalId && state.activeSignals[0]) {
+    state.currentSignalId = nearestSignal()?.id || state.activeSignals[0].id;
+    state.huntStartPos = state.playerPos;
+  }
+  const legendary = added.find((s) => s.legendary);
+  if (legendary) announceLegendary(legendary);
+}
+
+function nearestSignal() {
+  return [...state.activeSignals]
+    .filter((s) => !s._hidden)
+    .sort((a, b) => distanceM(state.playerPos, a.pos) - distanceM(state.playerPos, b.pos))[0] || null;
+}
+
+function announceLegendary(sig) {
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 600]);
+  ui.showLegendaryEvent(speciesById(sig.speciesId), sig, () => selectSignal(sig.id, true));
+}
+
+/** First GPS fix: load OSM terrain (briefly), then place the first signals. */
+async function startSpawning() {
+  ui.showToast('SCANNING TERRAIN — MAPPING PARKS, PATHS & WATER…', { ms: 0, kind: 'info' });
+  // Don't make the player wait forever on a slow Overpass server.
+  await Promise.race([
+    ensureTerrain(state.playerPos),
+    new Promise((r) => setTimeout(r, CONFIG.terrainTimeoutMs + 2000)),
+  ]);
+  state.spawnsStarted = true;
+  announceTerrain();
+  topUpSignals();
+  tick();
+}
+
+function announceTerrain() {
+  if (state.terrainAnnounced) return;
+  const status = terrainStatus();
+  if (status === 'ready') {
+    state.terrainAnnounced = true;
+    ui.showToast('TERRAIN MAPPED — SIGNALS LOCKED TO PARKS, PATHS & WATERSIDE', { ms: 3500, kind: 'info' });
+  } else if (status === 'failed') {
+    state.terrainAnnounced = true;
+    ui.showToast('⚠ MAP DATA UNAVAILABLE — SIGNALS AREN\'T SAFETY-CHECKED. STAY ON PATHS & WATCH FOR ROADS.', { ms: 7000, kind: 'warn' });
+  } else {
+    ui.hideToast();
+  }
+}
+
+/** Turn behaviour events into feedback for the player. */
+function handleBehaviourEvents(events) {
+  let removed = false;
+  for (const { type, sig } of events) {
+    const species = speciesById(sig.speciesId);
+    const isCurrent = sig.id === state.currentSignalId;
+    const name = sig.revealedClues.length ? species.name : 'The signal';
+    if (type === 'fled') {
+      if (navigator.vibrate) navigator.vibrate([40, 30, 40, 30, 160]);
+      ui.showToast(`⚡ IT NOTICED YOU! ${name.toUpperCase()} BOLTED — FOLLOW THE SIGNAL`, { ms: 4000, kind: 'alert' });
+    } else if (type === 'hid' && isCurrent) {
+      if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+      ui.showToast('◌ SIGNAL LOST — IT\'S HIDING. WAIT, OR CIRCLE ROUND AND COME BACK FROM ANOTHER SIDE', { ms: 5000, kind: 'alert' });
+    } else if (type === 'reappeared' && isCurrent) {
+      if (navigator.vibrate) navigator.vibrate(80);
+      ui.showToast('◉ SIGNAL REACQUIRED — IT MOVED. CHECK THE BEARING', { ms: 3500, kind: 'info' });
+    } else if (type === 'expired') {
+      removed = true;
+      ui.showToast(`★ THE ${species.name.toUpperCase()} SIGNAL HAS FADED… FOR NOW`, { ms: 5000, kind: 'legendary' });
+    } else if (type === 'dawn') {
+      removed = true;
+      if (isCurrent) ui.showToast(`☀ DAWN — THE ${species.name.toUpperCase()} SIGNAL FADED WITH THE NIGHT`, { ms: 5000, kind: 'info' });
+    }
+  }
+  if (removed) {
+    state.activeSignals = state.activeSignals.filter((s) => !s._remove);
+    if (!state.activeSignals.some((s) => s.id === state.currentSignalId)) {
+      state.currentSignalId = null;
+    }
+    topUpSignals();
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -78,6 +177,8 @@ function selectSignal(id, alsoGotoScanner) {
   else refreshCurrentScreen();
 }
 window.__theHuntSelectSignal = selectSignal;
+// Playtest/debug hook: ?debug=1 exposes live game state in the console.
+if (new URLSearchParams(location.search).get('debug') === '1') window.__theHuntState = state;
 
 function refreshCurrentScreen() {
   ui.renderHeader({
@@ -85,6 +186,7 @@ function refreshCurrentScreen() {
     activeCount: state.activeSignals.length,
     playerPos: state.playerPos,
   });
+  ui.setNightMode(state.night);
 
   if (state.currentScreen === 'scanner') {
     ui.renderScannerScreen(state.activeSignals, state.currentSignalId, state.playerHeading);
@@ -109,6 +211,12 @@ function refreshCurrentScreen() {
 
 function tick() {
   if (!state.playerPos) return;
+  const night = isNight(state.playerPos);
+  if (night !== state.night) {
+    state.night = night;
+    if (night && state.spawnsStarted) ui.showToast('☾ NIGHT HAS FALLEN — NEW SIGNALS ARE STIRRING', { ms: 4500, kind: 'info' });
+  }
+  handleBehaviourEvents(updateBehaviours(state.activeSignals, state.playerPos, { night }));
   for (const sig of state.activeSignals) recomputeSignal(sig);
   refreshCurrentScreen();
 }
@@ -135,7 +243,7 @@ function handleEvolve(speciesId) {
 
 function attemptCapture() {
   const sig = currentSignal();
-  if (!sig || sig._distanceM > CONFIG.captureRangeM) return;
+  if (!sig || sig._hidden || sig._distanceM > CONFIG.captureRangeM) return;
 
   const species = speciesById(sig.speciesId);
   const walked = state.huntStartPos ? distanceM(state.huntStartPos, state.playerPos) : 0;
@@ -147,19 +255,16 @@ function attemptCapture() {
   });
 
   state.activeSignals = state.activeSignals.filter((s) => s.id !== sig.id);
-  refillSignals(state.activeSignals, state.playerPos);
-
   // Auto-advance to the next nearest signal so the loop keeps flowing
   // ("Another signal detected...", GDD section 46) without forcing a
   // separate screen.
-  const next = [...state.activeSignals].sort((a, b) => {
-    const da = distanceM(state.playerPos, a.pos);
-    const db = distanceM(state.playerPos, b.pos);
-    return da - db;
-  })[0];
+  state.currentSignalId = null;
+  topUpSignals();
+  const next = nearestSignal();
   state.currentSignalId = next ? next.id : null;
   state.huntStartPos = state.playerPos;
 
+  if (species.rarity === 'legendary' && navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 100, 50, 400]);
   ui.showCaptureSuccessBanner(species, isFirst);
   refreshCurrentScreen();
   setTimeout(() => ui.hideCaptureSuccessBanner(), 4500);
@@ -241,13 +346,12 @@ function onPositionUpdate(pos) {
   }
   state.playerPos = pos;
   if (firstFix) {
-    refillSignals(state.activeSignals, state.playerPos);
-    if (!state.currentSignalId && state.activeSignals[0]) {
-      state.currentSignalId = state.activeSignals[0].id;
-      state.huntStartPos = state.playerPos;
-    }
+    state.night = isNight(pos);
     goToScreen('map');
+    startSpawning();
   } else {
+    // Refresh OSM terrain in the background once the player has moved far.
+    ensureTerrain(pos).then(announceTerrain);
     tick();
   }
 }
@@ -296,6 +400,7 @@ function wireEvents() {
   });
 
   document.getElementById('btn-capture').addEventListener('click', attemptCapture);
+  document.getElementById('legendary-dismiss').addEventListener('click', ui.hideLegendaryEvent);
   document.getElementById('cs-view-btn').addEventListener('click', () => {
     ui.hideCaptureSuccessBanner();
     goToScreen('journal');
@@ -326,7 +431,7 @@ function wireEvents() {
   });
   document.getElementById('map-engage-btn').addEventListener('click', (e) => {
     e.preventDefault();
-    const nearest = [...state.activeSignals].sort((a, b) => a._distanceM - b._distanceM)[0];
+    const nearest = [...state.activeSignals].filter((s) => !s._hidden).sort((a, b) => a._distanceM - b._distanceM)[0];
     if (nearest) selectSignal(nearest.id, true);
     else goToScreen('scanner');
   });

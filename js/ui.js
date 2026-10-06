@@ -15,13 +15,24 @@ const screens = {
 };
 
 const RARITY_SYMBOL = { common: '●', uncommon: '◆', rare: '❖', epic: '▲', legendary: '★' };
-const BEHAVIOR_LABEL = { stationary: 'STATIONARY // HOLDING POSITION', wanderer: 'WANDERER // MOVING SLOWLY' };
+const BEHAVIOR_LABEL = {
+  stationary: 'STATIONARY // HOLDING POSITION',
+  wanderer: 'WANDERER // MOVING SLOWLY',
+  runner: 'RUNNER // BOLTS WHEN APPROACHED',
+  hider: 'HIDER // VANISHES WHEN APPROACHED',
+};
+const HABITAT_SHORT = { trees: 'PARK / TREES', woods: 'WOODLAND', water: 'WATERSIDE', urban: 'FOOTPATH', any: 'PUBLIC PATH' };
 const HABITAT_LABEL = {
   trees: 'Prefers dense canopy & large trees',
   urban: 'Prefers built-up, populated areas',
   water: 'Stays close to rivers, lakes & canals',
-  night: 'More active after dusk',
+  night: 'Only appears after dark',
 };
+
+function fmtCountdown(ms) {
+  const t = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
 
 function rarityVar(rarity) {
   return `var(--rarity-${rarity})`;
@@ -98,6 +109,58 @@ export function showLookUpToast(show) {
   document.getElementById('lookup-toast').classList.toggle('hidden', !show);
 }
 
+let toastTimer = null;
+/**
+ * Short event notification (runner fled, signal hidden, terrain status…).
+ * kind: info | alert | warn | legendary. ms: 0 = stay until replaced/hidden.
+ */
+export function showToast(text, { ms = 3500, kind = 'info' } = {}) {
+  const el = document.getElementById('event-toast');
+  el.textContent = text;
+  el.className = `event-toast kind-${kind}`;
+  // Restart the entrance animation.
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  if (ms > 0) toastTimer = setTimeout(hideToast, ms);
+}
+
+export function hideToast() {
+  clearTimeout(toastTimer);
+  document.getElementById('event-toast').classList.add('hidden');
+}
+
+export function setNightMode(night) {
+  document.body.classList.toggle('is-night', !!night);
+}
+
+/* ------------------------------------------------------------------ */
+/* Legendary event                                                      */
+/* ------------------------------------------------------------------ */
+
+let legendaryTimer = null;
+export function showLegendaryEvent(species, sig, onTrack) {
+  const el = document.getElementById('legendary-event');
+  document.getElementById('le-text').textContent =
+    `${species.clues[0]} ${species.clues[1]} An unknown legendary signal has appeared — it won't stay long.`;
+  document.getElementById('le-behaviour').textContent = (sig.behavior || '').toUpperCase();
+  const update = () => {
+    document.getElementById('le-timer').textContent = sig.expiresAt ? fmtCountdown(sig.expiresAt - Date.now()) : '—';
+    document.getElementById('le-range').textContent = sig._distanceM != null ? `${Math.round(sig._distanceM)}m` : '<500m';
+  };
+  update();
+  clearInterval(legendaryTimer);
+  legendaryTimer = setInterval(update, 1000);
+  const track = document.getElementById('legendary-track');
+  track.onclick = () => { hideLegendaryEvent(); onTrack(); };
+  el.classList.remove('hidden');
+}
+
+export function hideLegendaryEvent() {
+  clearInterval(legendaryTimer);
+  document.getElementById('legendary-event').classList.add('hidden');
+}
+
 /* ------------------------------------------------------------------ */
 /* Scanner screen                                                       */
 /* ------------------------------------------------------------------ */
@@ -116,10 +179,19 @@ export function renderScannerScreen(signals, currentId, heading) {
   const subEl = document.getElementById('alert-sub');
   const rangeEl = document.getElementById('alert-range');
   const freqEl = document.getElementById('alert-freq');
-  if (current) {
+  document.getElementById('screen-scanner').classList.toggle('legendary-active', !!current?.legendary);
+  if (current && current._hidden) {
+    headlineEl.textContent = 'SIGNAL LOST';
+    subEl.textContent = `It's hiding (${fmtCountdown(current.hiddenUntil - Date.now())}). Wait, or circle round and come back from another side.`;
+    rangeEl.textContent = '◌ NO CONTACT';
+    freqEl.textContent = '| FREQ: —';
+  } else if (current) {
     const species = speciesById(current.speciesId);
-    headlineEl.textContent = current.revealedClues.length ? species.name.toUpperCase() : 'UNKNOWN SIGNAL DETECTED';
-    subEl.textContent = 'Approx. vector triangulation active';
+    const name = current.revealedClues.length ? species.name.toUpperCase() : 'UNKNOWN SIGNAL DETECTED';
+    headlineEl.textContent = current.legendary ? `★ ${current.revealedClues.length ? name : 'LEGENDARY SIGNAL'} ★` : name;
+    subEl.textContent = current.legendary && current.expiresAt
+      ? `Legendary signal — fades in ${fmtCountdown(current.expiresAt - Date.now())}`
+      : 'Approx. vector triangulation active';
     const inRange = current._distanceM <= CONFIG.scannerRangeM;
     rangeEl.textContent = inRange ? '● IN RANGE' : '○ OUT OF RANGE';
     freqEl.textContent = `| FREQ: ${(100 + current._distanceM * 0.4).toFixed(1)} MHz`;
@@ -130,7 +202,7 @@ export function renderScannerScreen(signals, currentId, heading) {
     freqEl.textContent = '| FREQ: —';
   }
 
-  const ratio = current ? signalStrengthRatio(current._distanceM) : 0;
+  const ratio = current && !current._hidden ? signalStrengthRatio(current._distanceM) : 0;
   const segs = Math.round(ratio * 8);
   document.getElementById('gain-label').textContent = `SIGNAL GAIN [${Math.round(ratio * 100)}%]`;
   document.getElementById('gain-segs').textContent = `${segs} / 8 SEGMENTS`;
@@ -146,13 +218,13 @@ export function renderScannerScreen(signals, currentId, heading) {
     const species = speciesById(sig.speciesId);
     const known = sig.revealedClues.length > 0;
     const btn = document.createElement('button');
-    btn.className = 'contact-tab' + (sig.id === (current && current.id) ? ' active' : '');
+    btn.className = 'contact-tab' + (sig.id === (current && current.id) ? ' active' : '') + (sig._hidden ? ' is-hidden' : '') + (sig.legendary ? ' is-legendary' : '');
     btn.innerHTML = `
       <div class="row1">
         <span class="sig-id" style="color:${rarityVar(species.rarity)}">SIG-${String.fromCharCode(65 + i)}</span>
         <span class="dot" style="background:${rarityVar(species.rarity)}"></span>
       </div>
-      <div class="dist">${Math.round(sig._distanceM)}m</div>
+      <div class="dist">${sig._hidden ? '??' : Math.round(sig._distanceM)}m</div>
       <div class="rarity-label" style="color:${rarityVar(species.rarity)}">${known ? species.name.toUpperCase() : RARITY[species.rarity].label.toUpperCase()}</div>
     `;
     btn.addEventListener('click', () => window.__theHuntSelectSignal?.(sig.id));
@@ -161,10 +233,11 @@ export function renderScannerScreen(signals, currentId, heading) {
 
   // --- Radar ---
   renderRadarBlips(signals, current, heading);
-  document.getElementById('radar-bearing').textContent = current
+  const live = current && !current._hidden;
+  document.getElementById('radar-bearing').textContent = live
     ? `BEARING: ${Math.round(current._bearingDeg)}°`
     : 'BEARING: —';
-  document.getElementById('radar-distance').textContent = current ? `${Math.round(current._distanceM)}` : '—';
+  document.getElementById('radar-distance').textContent = live ? `${Math.round(current._distanceM)}` : '—';
   document.getElementById('radar-radius').innerHTML = current
     ? `<strong>± ${CONFIG.searchZoneRadiusM}m</strong>`
     : '<strong>—</strong>';
@@ -174,8 +247,8 @@ export function renderScannerScreen(signals, currentId, heading) {
     statusEl.textContent = 'AWAITING GPS LOCK';
     statusEl.classList.remove('very-close');
   } else {
-    const veryClose = current._distanceM <= CONFIG.veryCloseM;
-    statusEl.textContent = veryClose ? '⚠ VERY CLOSE' : 'SIGNAL DETECTED';
+    const veryClose = !current._hidden && current._distanceM <= CONFIG.veryCloseM;
+    statusEl.textContent = current._hidden ? '◌ SIGNAL LOST' : veryClose ? '⚠ VERY CLOSE' : current.legendary ? '★ LEGENDARY SIGNAL' : 'SIGNAL DETECTED';
     statusEl.classList.toggle('very-close', veryClose);
   }
 
@@ -191,8 +264,13 @@ export function renderScannerScreen(signals, currentId, heading) {
       </div>
       <div class="telemetry-item">
         <div class="ti-icon"><svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M12 2 3 21h18L12 2Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></div>
-        <div><div class="ti-label">Habitat Correlation</div><div class="ti-value" style="white-space:normal;">${HABITAT_LABEL[species.habitat] || '—'}</div></div>
+        <div><div class="ti-label">Habitat Correlation</div><div class="ti-value" style="white-space:normal;">${HABITAT_LABEL[species.habitat] || '—'}${current.unchecked ? '' : ` — <span class="muted">${HABITAT_SHORT[current.habitat] || ''}</span>`}</div></div>
       </div>
+      ${current.unchecked ? `
+      <div class="telemetry-item">
+        <div class="ti-icon" style="color:var(--rarity-epic);">⚠</div>
+        <div><div class="ti-label">Terrain Unverified</div><div class="ti-value" style="white-space:normal;">Map data unavailable — this spot isn't safety-checked. Stay on paths and away from roads.</div></div>
+      </div>` : ''}
     `;
     current.revealedClues.forEach((clue) => {
       clueList.innerHTML += `
@@ -210,8 +288,8 @@ export function renderScannerScreen(signals, currentId, heading) {
   const gotoLabel = document.getElementById('goto-capture-label');
   gotoBtn.disabled = !current;
   if (current) {
-    const inCaptureRange = current._distanceM <= CONFIG.captureRangeM;
-    gotoLabel.textContent = inCaptureRange ? 'Enter Capture Mode' : 'Get closer, then enter Capture Mode';
+    const inCaptureRange = !current._hidden && current._distanceM <= CONFIG.captureRangeM;
+    gotoLabel.textContent = current._hidden ? 'Signal lost — wait for it to reappear' : inCaptureRange ? 'Enter Capture Mode' : 'Get closer, then enter Capture Mode';
   } else {
     gotoLabel.textContent = 'No signal selected';
   }
@@ -225,6 +303,7 @@ function renderRadarBlips(signals, current, heading) {
   const h = heading ?? 0;
 
   for (const sig of signals) {
+    if (sig._hidden) continue; // nothing to plot while it's hiding
     const relative = ((sig._bearingDeg - h + 360) % 360);
     const rad = (relative - 90) * (Math.PI / 180); // -90 so 0deg (ahead) points up
     const rPx = Math.min(dialRadiusPx - 14, (sig._distanceM / CONFIG.scannerRangeM) * dialRadiusPx);
@@ -234,7 +313,7 @@ function renderRadarBlips(signals, current, heading) {
     const isCurrent = current && sig.id === current.id;
 
     const el = document.createElement('div');
-    el.className = 'radar-blip';
+    el.className = 'radar-blip' + (sig.legendary ? ' legendary' : '');
     el.style.left = `${(x / 240) * 100}%`;
     el.style.top = `${(y / 240) * 100}%`;
     el.style.color = rarityVar(species.rarity);
@@ -315,8 +394,8 @@ export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetim
       <div class="zc-top">
         <span class="zc-badge" style="background:rgba(255,255,255,0.08);color:${getComputedColorForRarity(species.rarity)}">${RARITY[species.rarity].label.toUpperCase()}</span>
       </div>
-      <div class="zc-name">${sig.revealedClues.length ? species.name : 'Unknown Zone'}</div>
-      <div class="zc-sub">${Math.round(sig._distanceM)}m • search radius ±${CONFIG.searchZoneRadiusM}m</div>
+      <div class="zc-name">${sig._hidden ? 'Signal lost' : sig.legendary ? '★ Legendary Signal' : sig.revealedClues.length ? species.name : 'Unknown Zone'}</div>
+      <div class="zc-sub">${sig._hidden ? '??' : Math.round(sig._distanceM)}m • ${sig.unchecked ? 'unverified terrain' : HABITAT_SHORT[sig.habitat] || 'search zone'} • ±${CONFIG.searchZoneRadiusM}m</div>
     `;
     card.addEventListener('click', () => window.__theHuntSelectSignal?.(sig.id, true));
     cardsEl.appendChild(card);
@@ -328,7 +407,7 @@ export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetim
   document.getElementById('stat-lifetime').textContent = formatKm(lifetimeDistanceM || 0);
 
   const engageBtn = document.getElementById('map-engage-btn');
-  const overallNearest = [...signals].sort((a, b) => a._distanceM - b._distanceM)[0];
+  const overallNearest = [...signals].filter((s) => !s._hidden).sort((a, b) => a._distanceM - b._distanceM)[0];
   engageBtn.lastChild.textContent = overallNearest
     ? ` ENGAGE TACTICAL SCANNER [ ${Math.round(overallNearest._distanceM)}m CLOSEST ]`
     : ' ENGAGE TACTICAL SCANNER';
@@ -375,7 +454,7 @@ export function renderCaptureScreen(sig, usingFallback) {
   // enough to see them; until then they stay an anonymous signal orb.
   const wildForm = formFor(species, 1);
   const artEl = document.getElementById('ar-target-art');
-  const showArt = !!wildForm && sig._distanceM <= CONFIG.veryCloseM;
+  const showArt = !!wildForm && !sig._hidden && sig._distanceM <= CONFIG.veryCloseM;
   targetEl.classList.toggle('has-art', showArt);
   if (showArt && artEl.getAttribute('src') !== wildForm.art) artEl.setAttribute('src', wildForm.art);
   document.getElementById('ar-meta-name').textContent = wildForm ? `${species.name} — ${wildForm.form}` : species.name;
@@ -383,6 +462,15 @@ export function renderCaptureScreen(sig, usingFallback) {
   rarityBadge.className = `badge ${rarityClass(species.rarity)}`;
   rarityBadge.textContent = `${RARITY_SYMBOL[species.rarity]} ${RARITY[species.rarity].label}`;
   document.getElementById('ar-meta-sub').textContent = `BEHAVIOUR: ${species.behavior.toUpperCase()} // HABITAT: ${species.habitat.toUpperCase()}`;
+  targetEl.classList.toggle('is-hidden', !!sig._hidden);
+
+  if (sig._hidden) {
+    document.getElementById('ar-lock-readout').textContent = 'LOCK-ON: SIGNAL LOST';
+    proximityBanner.classList.add('hidden');
+    captureBtn.disabled = true;
+    captureLabel.textContent = `It's hiding… (${fmtCountdown(sig.hiddenUntil - Date.now())})`;
+    return;
+  }
 
   const lockRatio = Math.max(0, Math.min(1, 1 - sig._distanceM / (CONFIG.captureRangeM * 3)));
   document.getElementById('ar-lock-readout').textContent = usingFallback
@@ -406,7 +494,11 @@ export function setArFpsText(fps) {
 
 export function showCaptureSuccessBanner(species, isFirst) {
   const banner = document.getElementById('capture-success-banner');
-  document.getElementById('cs-tag').textContent = isFirst ? 'FIRST DISCOVERY!' : 'CONTAINMENT SYNCHRONIZED';
+  const legendary = species.rarity === 'legendary';
+  banner.classList.toggle('legendary', legendary);
+  document.getElementById('cs-tag').textContent = legendary
+    ? '★ LEGENDARY CAPTURED ★'
+    : isFirst ? 'FIRST DISCOVERY!' : 'CONTAINMENT SYNCHRONIZED';
   document.getElementById('cs-name').textContent = `${species.name} Added to Journal`;
   document.getElementById('cs-sub').textContent = `${RARITY[species.rarity].label} specimen`;
   const form = formFor(species, 1);

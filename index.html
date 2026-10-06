@@ -308,6 +308,31 @@
   </div>
 </div>
 
+<!-- Behaviour / terrain / night notifications -->
+<div class="event-toast hidden" id="event-toast" role="status" aria-live="polite"></div>
+
+<!-- Legendary signal event -->
+<div id="legendary-event" class="legendary-event hidden" role="dialog" aria-modal="true" aria-labelledby="le-title">
+  <div class="le-card">
+    <div class="le-rays" aria-hidden="true"></div>
+    <div class="le-tag">★ LEGENDARY SIGNAL ★</div>
+    <div class="le-glyph" aria-hidden="true">
+      <span class="le-ring r1"></span><span class="le-ring r2"></span><span class="le-ring r3"></span>
+      <span class="le-core">★</span>
+    </div>
+    <h2 class="le-title" id="le-title">SOMETHING ENORMOUS IS MOVING</h2>
+    <p class="le-text" id="le-text">—</p>
+    <div class="le-meta">
+      <div><span class="le-k">RANGE</span><span class="le-v" id="le-range">—</span></div>
+      <div><span class="le-k">FADES IN</span><span class="le-v" id="le-timer">—</span></div>
+      <div><span class="le-k">BEHAVIOUR</span><span class="le-v" id="le-behaviour">—</span></div>
+    </div>
+    <button class="btn le-track" id="legendary-track">TRACK THE SIGNAL</button>
+    <button class="btn btn-ghost le-dismiss" id="legendary-dismiss">Not now</button>
+    <p class="le-safety">Stay on paths. It's dark — keep to lit areas and hunt with someone.</p>
+  </div>
+</div>
+
 <footer class="toast hidden" id="lookup-toast">👀 LOOK UP — CHECK YOUR SURROUNDINGS</footer>
 
 <nav class="app-nav hidden" id="app-nav">
