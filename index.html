@@ -298,6 +298,18 @@
     <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0-4-4m4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 17v2.5A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5V17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
     Export Field Log (.json)
   </button>
+
+  <!-- Playtest analytics (GDD §50) — local only, no coordinates -->
+  <div class="glass-card playtest-card" id="playtest-card">
+    <div class="label-caps muted" style="margin-bottom:8px;">PLAYTEST DATA · GDD §50</div>
+    <div class="stats-grid" id="playtest-stats"></div>
+    <div class="playtest-abandon" id="playtest-abandon"></div>
+    <button class="btn btn-ghost" id="btn-export-analytics" style="margin-top:10px;">
+      <svg class="icon" viewBox="0 0 24 24" fill="none"><path d="M4 19h16M7 15V9m5 6V5m5 10v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      Export Playtest Data (.json)
+    </button>
+    <button class="btn-text-danger" id="btn-reset-analytics">Reset playtest data</button>
+  </div>
 </section>
 
 <!-- JOURNAL ENTRY MODAL -->

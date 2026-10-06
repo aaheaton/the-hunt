@@ -21,6 +21,7 @@ import {
   exportFieldLogBlobUrl,
 } from './storage.js';
 import * as ui from './ui.js';
+import * as analytics from './analytics.js';
 
 const state = {
   playerPos: null,
@@ -75,9 +76,11 @@ function topUpSignals() {
   if (!state.playerPos || !state.spawnsStarted) return;
   state.night = isNight(state.playerPos);
   const added = refillSignals(state.activeSignals, state.playerPos, { night: state.night });
+  for (const sig of added) analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
   if (!state.currentSignalId && state.activeSignals[0]) {
     state.currentSignalId = nearestSignal()?.id || state.activeSignals[0].id;
     state.huntStartPos = state.playerPos;
+    analytics.signalTracked(state.currentSignalId, 'auto');
   }
   const legendary = added.find((s) => s.legendary);
   if (legendary) announceLegendary(legendary);
@@ -111,6 +114,7 @@ async function startSpawning() {
 function announceTerrain() {
   if (state.terrainAnnounced) return;
   const status = terrainStatus();
+  analytics.noteContext({ terrain: status });
   if (status === 'ready') {
     state.terrainAnnounced = true;
     ui.showToast('TERRAIN MAPPED — SIGNALS LOCKED TO PARKS, PATHS & WATERSIDE', { ms: 3500, kind: 'info' });
@@ -129,6 +133,8 @@ function handleBehaviourEvents(events) {
     const species = speciesById(sig.speciesId);
     const isCurrent = sig.id === state.currentSignalId;
     const name = sig.revealedClues.length ? species.name : 'The signal';
+    if (type === 'fled' || type === 'hid') analytics.behaviourEvent(type, sig.id);
+    if (type === 'expired' || type === 'dawn') analytics.signalGone(sig.id, type === 'expired' ? 'faded' : 'dawn');
     if (type === 'fled') {
       if (navigator.vibrate) navigator.vibrate([40, 30, 40, 30, 160]);
       ui.showToast(`⚡ IT NOTICED YOU! ${name.toUpperCase()} BOLTED — FOLLOW THE SIGNAL`, { ms: 4000, kind: 'alert' });
@@ -161,6 +167,7 @@ function handleBehaviourEvents(events) {
 
 function goToScreen(name) {
   state.currentScreen = name;
+  analytics.screenChanged(name);
   ui.showScreen(name);
   if (name === 'capture') {
     startCaptureScreenSensors();
@@ -173,12 +180,16 @@ function goToScreen(name) {
 function selectSignal(id, alsoGotoScanner) {
   state.currentSignalId = id;
   state.huntStartPos = state.playerPos;
+  analytics.signalTracked(id, 'player');
   if (alsoGotoScanner) goToScreen('scanner');
   else refreshCurrentScreen();
 }
 window.__theHuntSelectSignal = selectSignal;
 // Playtest/debug hook: ?debug=1 exposes live game state in the console.
-if (new URLSearchParams(location.search).get('debug') === '1') window.__theHuntState = state;
+if (new URLSearchParams(location.search).get('debug') === '1') {
+  window.__theHuntState = state;
+  window.__theHuntAnalytics = analytics;
+}
 
 function refreshCurrentScreen() {
   ui.renderHeader({
@@ -202,6 +213,7 @@ function refreshCurrentScreen() {
     ui.renderCaptureScreen(currentSignal(), state.arFallback);
   } else if (state.currentScreen === 'journal') {
     ui.renderJournal(openDossier);
+    ui.renderPlaytestStats(analytics.summary());
   }
 }
 
@@ -218,6 +230,7 @@ function tick() {
   }
   handleBehaviourEvents(updateBehaviours(state.activeSignals, state.playerPos, { night }));
   for (const sig of state.activeSignals) recomputeSignal(sig);
+  analytics.tick(state.activeSignals);
   refreshCurrentScreen();
 }
 
@@ -247,6 +260,7 @@ function attemptCapture() {
 
   const species = speciesById(sig.speciesId);
   const walked = state.huntStartPos ? distanceM(state.huntStartPos, state.playerPos) : 0;
+  analytics.signalCaptured(sig.id);
   const { isFirst } = recordCapture({
     speciesId: species.id,
     rarity: species.rarity,
@@ -263,6 +277,7 @@ function attemptCapture() {
   const next = nearestSignal();
   state.currentSignalId = next ? next.id : null;
   state.huntStartPos = state.playerPos;
+  if (next) analytics.signalTracked(next.id, 'auto');
 
   if (species.rarity === 'legendary' && navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 100, 50, 400]);
   ui.showCaptureSuccessBanner(species, isFirst);
@@ -342,11 +357,14 @@ function onPositionUpdate(pos) {
     if (delta < 200) {
       state.sessionDistanceM += delta;
       addLifetimeDistance(delta);
+      analytics.moved(delta);
     }
   }
   state.playerPos = pos;
   if (firstFix) {
     state.night = isNight(pos);
+    analytics.noteGpsFix();
+    analytics.noteContext({ night: state.night });
     goToScreen('map');
     startSpawning();
   } else {
@@ -365,6 +383,8 @@ function onPositionError(err) {
 
 async function startHunting() {
   ui.setPermissionStatus('Requesting permissions…');
+  analytics.startSession();
+  analytics.screenChanged(state.currentScreen);
   await requestOrientationPermission();
 
   stopWatchingHeading = watchHeading((heading) => {
@@ -456,10 +476,45 @@ function wireEvents() {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   });
+  document.getElementById('btn-export-analytics').addEventListener('click', () => {
+    downloadBlobUrl(analytics.exportBlobUrl(), `the-hunt-playtest-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.json`);
+  });
+  // Two-tap confirm (no browser confirm() dialog).
+  let resetArmedUntil = 0;
+  document.getElementById('btn-reset-analytics').addEventListener('click', (e) => {
+    const btn = e.currentTarget;
+    if (Date.now() < resetArmedUntil) {
+      analytics.resetAnalytics();
+      resetArmedUntil = 0;
+      btn.textContent = 'Reset playtest data';
+      ui.showToast('PLAYTEST DATA CLEARED', { ms: 2500, kind: 'info' });
+      refreshCurrentScreen();
+    } else {
+      resetArmedUntil = Date.now() + 4000;
+      btn.textContent = 'Tap again to clear';
+      setTimeout(() => { if (Date.now() >= resetArmedUntil) btn.textContent = 'Reset playtest data'; }, 4100);
+    }
+  });
+  analytics.setRehydrate(() => {
+    for (const sig of state.activeSignals) {
+      analytics.signalDetected(sig, state.playerPos ? distanceM(state.playerPos, sig.pos) : null);
+    }
+    if (state.currentSignalId) analytics.signalTracked(state.currentSignalId, 'auto');
+  });
 
   setInterval(tick, CONFIG.tickMs);
   setInterval(() => wanderTick(state.activeSignals), CONFIG.wanderTickMs);
   setupLookUpReminder();
+}
+
+function downloadBlobUrl(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
 function registerServiceWorker() {

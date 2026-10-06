@@ -707,3 +707,53 @@ function evolutionPanelHtml(species, stage) {
 export function closeJournalModal() {
   document.getElementById('journal-modal').classList.add('hidden');
 }
+
+/* ------------------------------------------------------------------ */
+/* Playtest analytics card (Journal) — GDD §50                          */
+/* ------------------------------------------------------------------ */
+
+function fmtDuration(s) {
+  if (s == null) return '—';
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m${String(s % 60).padStart(2, '0')}`;
+}
+function fmtDist(m) {
+  if (m == null) return '—';
+  return m >= 1000 ? `${(m / 1000).toFixed(1)}km` : `${m}m`;
+}
+
+export function renderPlaytestStats(sum) {
+  const grid = document.getElementById('playtest-stats');
+  if (!grid) return;
+  const tile = (val, label) =>
+    `<div class="stat-tile"><div class="st-val">${val}</div><div class="st-label">${label}</div></div>`;
+  const sig = sum.signals;
+  grid.innerHTML = [
+    tile(sum.sessions, 'Sessions'),
+    tile(`${sig.captured}/${sig.detected}`, 'Captured / Detected'),
+    tile(sig.trackedToCapturedPct == null ? '—' : `${Math.round(sig.trackedToCapturedPct)}%`, 'Tracked → Caught'),
+    tile(fmtDuration(sum.perCapturedHunt.medianActiveTrackS), 'Median Hunt'),
+    tile(fmtDist(sum.perSession.meanDistanceM), 'Avg Walk / Session'),
+    tile(sum.perSession.capturesPerActiveHour ?? '—', 'Captures / Hour'),
+  ].join('');
+
+  const ab = sum.abandonment;
+  const wrap = document.getElementById('playtest-abandon');
+  if (!ab.trackedNotCaptured) {
+    wrap.innerHTML = `<p class="muted pt-note">No abandoned hunts logged yet.</p>`;
+    return;
+  }
+  const max = Math.max(...Object.values(ab.byClosestStageReached), 1);
+  const order = ['distant', 'far', 'mid', 'close', 'very-close', 'capture-range'];
+  wrap.innerHTML = `
+    <div class="label-caps muted pt-sub">WHERE HUNTS WERE ABANDONED (${ab.trackedNotCaptured}) · CLOSEST REACHED</div>
+    ${order.map((k) => {
+      const n = ab.byClosestStageReached[k] || 0;
+      return `<div class="pt-bar-row">
+        <span class="pt-bar-label">${ab.stageKey[k]}</span>
+        <span class="pt-bar"><span style="width:${(n / max) * 100}%"></span></span>
+        <span class="pt-bar-n">${n}</span>
+      </div>`;
+    }).join('')}`;
+}

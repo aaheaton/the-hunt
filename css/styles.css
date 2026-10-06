@@ -853,3 +853,16 @@ body.is-night #hdr-status::after { content: ' • ☾ NIGHT'; color: #C9A7FF; }
 @media (prefers-reduced-motion: reduce) {
   .le-rays, .le-ring, .leaflet-interactive.sig-beacon, .leaflet-interactive.zone-legendary.sig-zone { animation: none; }
 }
+
+/* --- Playtest analytics card (Journal) --- */
+.playtest-card { display: flex; flex-direction: column; }
+.playtest-card .stats-grid { row-gap: 8px; }
+.playtest-abandon { margin-top: 12px; display: flex; flex-direction: column; gap: 5px; }
+.playtest-abandon .pt-sub { font-size: 9px; margin-bottom: 4px; }
+.playtest-abandon .pt-note { font-size: 12px; margin: 0; }
+.pt-bar-row { display: grid; grid-template-columns: 52px 1fr 28px; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--on-surface-variant); }
+.pt-bar { height: 8px; background: var(--surface-container); border-radius: 999px; overflow: hidden; }
+.pt-bar > span { display: block; height: 100%; background: var(--secondary-fixed-dim); border-radius: 999px; min-width: 2px; }
+.pt-bar-n { text-align: right; color: var(--text-primary); }
+.btn-text-danger { background: none; border: none; color: var(--text-muted); font-family: var(--font-display); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 10px; margin-top: 4px; cursor: pointer; }
+.btn-text-danger:active { color: #ff6b6b; }

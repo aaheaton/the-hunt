@@ -136,7 +136,8 @@ are ever stored, never a continuous GPS trail, and everything stays
 on-device. The one thing that leaves the phone: to place creatures
 safely, the app asks the public OpenStreetMap Overpass API for parks,
 paths, water and roads around you, sending a location **rounded to ~100m**
-(never your exact position, never a trail).
+(never your exact position, never a trail). Playtest analytics (below)
+store no coordinates at all.
 
 ## Creature roster, art & evolution (updated 2026-10-01)
 
@@ -196,3 +197,40 @@ falls back to random placement and warns the player.
 `?night=1` / `?night=0` force night/day · `?spawn=hollow-hart` (or any
 species id) forces the first spawn · `?debug=1` exposes game state as
 `window.__theHuntState` in the console.
+
+## Playtest analytics (added 2026-10-06)
+
+`js/analytics.js` logs the GDD §50 success metrics locally so every
+playtest produces numbers. Nothing is sent anywhere and **no coordinates
+are recorded** — only distances, durations, counts and species/behaviour
+labels (stored in localStorage under `thehunt_analytics_v1`, last 200
+sessions).
+
+**What's logged**
+
+- *Session*: start/end, time to first GPS fix, time to first capture,
+  distance walked, foreground play time, time per screen, terrain status,
+  day/night. Returning after 30+ min in the background starts a new session.
+- *Hunt* (one per signal): species, rarity, behaviour, habitat, distance
+  when detected, who picked it (`player` tap vs `auto` nearest-after-capture),
+  active tracking time, metres walked while tracking, closest approach,
+  when it first reached very-close / capture range, runner escapes, hider
+  vanishes, and the outcome (`captured`, `faded`, `dawn`, `session-ended`).
+- *Abandonment*: a tracked hunt that never got captured is bucketed by the
+  closest band the player reached (>150m, ≤150, ≤80, ≤30, ≤20, ≤12m) — that's
+  "where players give up".
+
+**Getting the data out:** Journal tab → *Playtest Data* card shows headline
+numbers and the abandonment histogram; **Export Playtest Data (.json)**
+downloads a `summary` block (capture rates, median hunt time, distance per
+session, captures/hour, breakdowns by behaviour/rarity/species, screen time)
+plus every raw session, and the current tuning values from `config.js` so
+exports from different tuning passes can be compared. **Reset playtest
+data** (tap twice) clears it before a fresh round of tests.
+
+Hunts that are still open don't appear in the abandonment chart until they
+end (capture, fade, or the session closing — including the app being
+killed, which is detected on next launch).
+
+With `?debug=1`, `window.__theHuntAnalytics.summary()` is available in the
+console.
