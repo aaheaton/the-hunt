@@ -234,3 +234,33 @@ killed, which is detected on next launch).
 
 With `?debug=1`, `window.__theHuntAnalytics.summary()` is available in the
 console.
+
+## Spawning & the Search stage (updated 2026-10-07)
+
+Changes from the first outdoor playtest (0 captures in 24 min):
+
+- **Spawn range 40–450m** (measured to the creature itself).
+- **First signal of every session is within ~25–50m** (never a legendary).
+  If there's no safe spot that close, the ring widens to 80m, then 150m.
+- **Field upkeep while walking** (checked every 5s): signals more than
+  **500m** away are removed (logged as `left-behind`), and there are always
+  **1–2 signals within 150m** — if none are, 1–2 new ones spawn 40–150m
+  away (the furthest untracked signal makes room if the list is full).
+- **Signals survive restarts for 30 minutes** (`thehunt_active_signals_v1`
+  in localStorage, including the one you were tracking). Older saves, expired
+  legendaries, night creatures after dawn and anything now >500m away are
+  dropped. These are creature positions only, on the device only.
+- **Search stage (GDD §3)** — new `js/search.js`. Inside the 35m search area:
+  - "IN THE SEARCH AREA" toast + vibration on entry.
+  - Hot/cold replaces exact metres and bearing (WARM → HOT → BURNING HOT →
+    RIGHT HERE). Pulses (vibration + a ring on the radar) speed up from
+    every ~1.6s at 35m to ~0.25s at capture range.
+  - "❄ COLDER" warning (long buzz) when you move ~4m+ further away
+    (smoothed so GPS jitter doesn't trigger it); "you left the search area"
+    beyond 45m.
+  - Set `searchHideDistance: false` in `config.js` to keep showing metres.
+- Analytics: hunts now log `enteredSearchAreaAt`, `searchEntries`,
+  `colderWarnings`; the summary has a `searchStage` block and
+  `signalsLeftBehind`.
+
+All tunables are in `js/config.js`. Service-worker cache v11.

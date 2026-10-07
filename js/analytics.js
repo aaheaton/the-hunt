@@ -108,6 +108,7 @@ export function startSession(extra = {}) {
     counts: {
       detected: 0, tracked: 0, captured: 0, faded: 0,
       fled: 0, hid: 0, switches: 0, legendaryEvents: 0,
+      leftBehind: 0, searchEntries: 0, colderWarnings: 0,
     },
     hunts: [],
     ...extra,
@@ -170,7 +171,10 @@ export function signalDetected(sig, distFromPlayerM) {
     reachedCaptureRangeAt: null,
     fled: 0,
     hid: 0,
-    outcome: null,           // captured | faded | dawn | session-ended
+    enteredSearchAreaAt: null, // first time inside the search area (Search stage)
+    searchEntries: 0,
+    colderWarnings: 0,
+    outcome: null,           // captured | faded | dawn | left-behind | made-room | session-ended
     endedAt: null,
     stageAtEnd: null,        // closest band reached
     timeToCaptureMs: null,   // wall clock: first tracked -> captured
@@ -206,6 +210,19 @@ export function behaviourEvent(type, sigId) {
   if (type === 'hid') { session.counts.hid += 1; if (h) h.hid += 1; }
 }
 
+/** Search-stage events for a hunt: entered | left | warmer | colder. */
+export function searchEvent(type, sigId) {
+  if (!session) return;
+  const h = hunts.get(sigId);
+  if (type === 'entered') {
+    session.counts.searchEntries = (session.counts.searchEntries || 0) + 1;
+    if (h) { h.searchEntries += 1; if (!h.enteredSearchAreaAt) h.enteredSearchAreaAt = Date.now(); }
+  } else if (type === 'colder') {
+    session.counts.colderWarnings = (session.counts.colderWarnings || 0) + 1;
+    if (h) h.colderWarnings += 1;
+  }
+}
+
 export function signalCaptured(sigId) {
   if (!session) return;
   const h = hunts.get(sigId);
@@ -221,13 +238,14 @@ export function signalCaptured(sigId) {
   persist(true);
 }
 
-/** Signal left the active list without a capture (legendary expiry, dawn). */
+/** Signal left the active list without a capture (legendary expiry, dawn, left behind). */
 export function signalGone(sigId, reason) {
   if (!session) return;
   const h = hunts.get(sigId);
   if (h && !h.outcome) {
     finaliseHunt(h, reason, Date.now(), session);
-    session.counts.faded += 1;
+    if (reason === 'left-behind' || reason === 'made-room') session.counts.leftBehind = (session.counts.leftBehind || 0) + 1;
+    else session.counts.faded += 1;
   }
   if (currentHuntId === sigId) currentHuntId = null;
   persist(true);
@@ -400,6 +418,14 @@ export function summary() {
       medianStartDistanceM: median(captured.map((h) => h.detectedDistM)),
       medianSecondsFromCaptureRangeToCapture: median(captured.map((h) =>
         h.reachedCaptureRangeAt ? Math.round((h.endedAt - h.reachedCaptureRangeAt) / 1000) : null)),
+      medianSecondsFromSearchAreaToCapture: median(captured.map((h) =>
+        h.enteredSearchAreaAt ? Math.round((h.endedAt - h.enteredSearchAreaAt) / 1000) : null)),
+    },
+    searchStage: {
+      huntsThatReachedSearchArea: tracked.filter((h) => h.enteredSearchAreaAt).length,
+      capturedAfterReachingSearchArea: captured.filter((h) => h.enteredSearchAreaAt).length,
+      searchAreaEntries: sum((s) => s.counts.searchEntries),
+      colderWarnings: sum((s) => s.counts.colderWarnings),
     },
     abandonment: {
       trackedNotCaptured: trackedNotCaptured.length,
@@ -414,6 +440,7 @@ export function summary() {
       runnerEscapes: sum((s) => s.counts.fled),
       hiderVanishes: sum((s) => s.counts.hid),
       signalSwitches: sum((s) => s.counts.switches),
+      signalsLeftBehind: sum((s) => s.counts.leftBehind),
     },
     byBehaviour: groupStats(finished, 'behaviour'),
     byRarity: groupStats(finished, 'rarity'),
@@ -442,6 +469,13 @@ export function exportBlobUrl() {
         captureRangeM: CONFIG.captureRangeM,
         minActiveSignals: CONFIG.minActiveSignals,
         maxActiveSignals: CONFIG.maxActiveSignals,
+        firstSignalMaxDistanceM: CONFIG.firstSignalMaxDistanceM,
+        despawnDistanceM: CONFIG.despawnDistanceM,
+        nearRadiusM: CONFIG.nearRadiusM,
+        nearSignals: `${CONFIG.nearMinSignals}-${CONFIG.nearMaxSignals}`,
+        signalPersistMin: CONFIG.signalPersistMs / 60000,
+        searchExitM: CONFIG.searchExitM,
+        searchHideDistance: CONFIG.searchHideDistance,
       },
     },
     privacy: 'No coordinates are recorded — only distances, durations, counts and species labels.',

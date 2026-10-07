@@ -1,7 +1,7 @@
 // Minimal app-shell service worker: makes the prototype installable and
 // gives it basic offline resilience. Not doing anything clever with
 // runtime caching yet — that's a later-stage concern.
-const CACHE_NAME = 'the-hunt-v10';
+const CACHE_NAME = 'the-hunt-v11';
 const APP_SHELL = [
   './',
   './index.html',
@@ -20,6 +20,7 @@ const APP_SHELL = [
   './js/behaviours.js',
   './js/sun.js',
   './js/analytics.js',
+  './js/search.js',
   './js/vendor/leaflet.js',
   './css/leaflet.css',
   './manifest.json',

@@ -4,6 +4,7 @@
 import { CONFIG } from './config.js';
 import { RARITY, SPECIES, speciesById, formFor, maxStage } from './characters.js';
 import { renderLiveMap } from './livemap.js';
+import { isSearching, temperatureFor } from './search.js';
 import { getCollection, getJournal, hunterLevel, totalDiscoveredSpeciesCount, evolutionStatus } from './storage.js';
 
 const screens = {
@@ -165,6 +166,28 @@ export function hideLegendaryEvent() {
 /* Scanner screen                                                       */
 /* ------------------------------------------------------------------ */
 
+/** Searching with exact metres hidden (hot/cold only)? */
+function hideMetres(sig) {
+  return CONFIG.searchHideDistance && isSearching(sig);
+}
+
+/** Distance text for lists/cards: temperature while searching, else metres. */
+function distText(sig) {
+  if (sig._hidden) return '??m';
+  if (hideMetres(sig)) return temperatureFor(sig._distanceM).short;
+  return `${Math.round(sig._distanceM)}m`;
+}
+
+/** One visual "ping" of the search pulse (haptics are fired by app.js). */
+export function searchPulse(intervalMs) {
+  const el = document.getElementById('search-pulse');
+  if (!el) return;
+  el.style.animationDuration = `${Math.max(220, Math.min(900, intervalMs * 0.85))}ms`;
+  el.classList.remove('go');
+  void el.offsetWidth;
+  el.classList.add('go');
+}
+
 function signalStrengthRatio(distanceM) {
   return Math.max(0, Math.min(1, 1 - distanceM / CONFIG.scannerRangeM));
 }
@@ -193,8 +216,9 @@ export function renderScannerScreen(signals, currentId, heading) {
       ? `Legendary signal — fades in ${fmtCountdown(current.expiresAt - Date.now())}`
       : 'Approx. vector triangulation active';
     const inRange = current._distanceM <= CONFIG.scannerRangeM;
-    rangeEl.textContent = inRange ? '● IN RANGE' : '○ OUT OF RANGE';
-    freqEl.textContent = `| FREQ: ${(100 + current._distanceM * 0.4).toFixed(1)} MHz`;
+    rangeEl.textContent = isSearching(current) ? '◎ SEARCH AREA' : inRange ? '● IN RANGE' : '○ OUT OF RANGE';
+    freqEl.textContent = hideMetres(current) ? '| FREQ: SCATTERED' : `| FREQ: ${(100 + current._distanceM * 0.4).toFixed(1)} MHz`;
+    if (isSearching(current)) subEl.textContent = 'IN THE SEARCH AREA — follow the pulses: faster = warmer.';
   } else {
     headlineEl.textContent = 'NO SIGNALS YET';
     subEl.textContent = 'Scanning for nearby activity…';
@@ -224,7 +248,7 @@ export function renderScannerScreen(signals, currentId, heading) {
         <span class="sig-id" style="color:${rarityVar(species.rarity)}">SIG-${String.fromCharCode(65 + i)}</span>
         <span class="dot" style="background:${rarityVar(species.rarity)}"></span>
       </div>
-      <div class="dist">${sig._hidden ? '??' : Math.round(sig._distanceM)}m</div>
+      <div class="dist">${distText(sig)}</div>
       <div class="rarity-label" style="color:${rarityVar(species.rarity)}">${known ? species.name.toUpperCase() : RARITY[species.rarity].label.toUpperCase()}</div>
     `;
     btn.addEventListener('click', () => window.__theHuntSelectSignal?.(sig.id));
@@ -234,10 +258,18 @@ export function renderScannerScreen(signals, currentId, heading) {
   // --- Radar ---
   renderRadarBlips(signals, current, heading);
   const live = current && !current._hidden;
-  document.getElementById('radar-bearing').textContent = live
-    ? `BEARING: ${Math.round(current._bearingDeg)}°`
-    : 'BEARING: —';
-  document.getElementById('radar-distance').textContent = live ? `${Math.round(current._distanceM)}` : '—';
+  const searching = isSearching(current);
+  const hide = hideMetres(current);
+  const temp = searching ? temperatureFor(current._distanceM) : null;
+  const trend = searching ? current.search.trend : null;
+  const scannerEl = document.getElementById('screen-scanner');
+  scannerEl.classList.toggle('searching', searching);
+  scannerEl.dataset.temp = temp ? (trend === 'colder' ? 'cold' : temp.id) : '';
+  document.getElementById('radar-bearing').textContent = !live
+    ? 'BEARING: —'
+    : hide ? 'BEARING: SCATTERED — SEARCH ON FOOT' : `BEARING: ${Math.round(current._bearingDeg)}°`;
+  document.getElementById('radar-distance').textContent = !live ? '—' : hide ? temp.short : `${Math.round(current._distanceM)}`;
+  document.getElementById('radar-dist-unit').textContent = hide ? '' : 'METRES';
   document.getElementById('radar-radius').innerHTML = current
     ? `<strong>± ${CONFIG.searchZoneRadiusM}m</strong>`
     : '<strong>—</strong>';
@@ -246,6 +278,12 @@ export function renderScannerScreen(signals, currentId, heading) {
   if (!current) {
     statusEl.textContent = 'AWAITING GPS LOCK';
     statusEl.classList.remove('very-close');
+  } else if (searching) {
+    statusEl.textContent =
+      trend === 'colder' ? `❄ COLDER ▼ — ${temp.label}` :
+      trend === 'warmer' ? `🔥 WARMER ▲ — ${temp.label}` :
+      `◎ SEARCHING — ${temp.label}`;
+    statusEl.classList.toggle('very-close', temp.id === 'onit');
   } else {
     const veryClose = !current._hidden && current._distanceM <= CONFIG.veryCloseM;
     statusEl.textContent = current._hidden ? '◌ SIGNAL LOST' : veryClose ? '⚠ VERY CLOSE' : current.legendary ? '★ LEGENDARY SIGNAL' : 'SIGNAL DETECTED';
@@ -304,6 +342,7 @@ function renderRadarBlips(signals, current, heading) {
 
   for (const sig of signals) {
     if (sig._hidden) continue; // nothing to plot while it's hiding
+    if (hideMetres(sig)) continue; // searching: the pulse ring replaces the blip
     const relative = ((sig._bearingDeg - h + 360) % 360);
     const rad = (relative - 90) * (Math.PI / 180); // -90 so 0deg (ahead) points up
     const rPx = Math.min(dialRadiusPx - 14, (sig._distanceM / CONFIG.scannerRangeM) * dialRadiusPx);
@@ -395,7 +434,7 @@ export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetim
         <span class="zc-badge" style="background:rgba(255,255,255,0.08);color:${getComputedColorForRarity(species.rarity)}">${RARITY[species.rarity].label.toUpperCase()}</span>
       </div>
       <div class="zc-name">${sig._hidden ? 'Signal lost' : sig.legendary ? '★ Legendary Signal' : sig.revealedClues.length ? species.name : 'Unknown Zone'}</div>
-      <div class="zc-sub">${sig._hidden ? '??' : Math.round(sig._distanceM)}m • ${sig.unchecked ? 'unverified terrain' : HABITAT_SHORT[sig.habitat] || 'search zone'} • ±${CONFIG.searchZoneRadiusM}m</div>
+      <div class="zc-sub">${distText(sig)} • ${sig.unchecked ? 'unverified terrain' : HABITAT_SHORT[sig.habitat] || 'search zone'} • ±${CONFIG.searchZoneRadiusM}m</div>
     `;
     card.addEventListener('click', () => window.__theHuntSelectSignal?.(sig.id, true));
     cardsEl.appendChild(card);
@@ -477,15 +516,22 @@ export function renderCaptureScreen(sig, usingFallback) {
     ? `SONAR LOCK: ${Math.round(lockRatio * 100)}%`
     : `LOCK-ON: ${Math.round(lockRatio * 100)}%`;
 
-  const veryClose = sig._distanceM <= CONFIG.veryCloseM;
-  proximityBanner.classList.toggle('hidden', !veryClose);
-  if (veryClose) {
-    document.getElementById('ar-proximity-text').textContent = `TARGET VERY CLOSE — ${Math.round(sig._distanceM)} METRES`;
+  const searching = isSearching(sig);
+  const hide = hideMetres(sig);
+  const temp = searching ? temperatureFor(sig._distanceM) : null;
+  const showBanner = searching || sig._distanceM <= CONFIG.veryCloseM;
+  proximityBanner.classList.toggle('hidden', !showBanner);
+  if (showBanner) {
+    document.getElementById('ar-proximity-text').textContent = hide
+      ? `${sig.search.trend === 'colder' ? '❄ COLDER — ' : ''}${temp.label} — SEARCH AROUND YOU`
+      : `TARGET VERY CLOSE — ${Math.round(sig._distanceM)} METRES`;
   }
 
   const inRange = sig._distanceM <= CONFIG.captureRangeM;
   captureBtn.disabled = !inRange;
-  captureLabel.textContent = inRange ? 'Deploy Capture' : `Get closer (${Math.round(sig._distanceM)}m away)`;
+  captureLabel.textContent = inRange
+    ? 'Deploy Capture'
+    : hide ? `Search closer (${temp.label.toLowerCase()})` : `Get closer (${Math.round(sig._distanceM)}m away)`;
 }
 
 export function setArFpsText(fps) {

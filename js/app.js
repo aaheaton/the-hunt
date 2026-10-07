@@ -6,7 +6,17 @@ import { CONFIG } from './config.js';
 import { distanceM, bearingDeg } from './geo.js';
 import { speciesById } from './characters.js';
 import { requestOrientationPermission, watchPosition, watchHeading } from './sensors.js';
-import { wanderTick, refillSignals } from './spawner.js';
+import {
+  wanderTick,
+  refillSignals,
+  rollSignalTarget,
+  spawnFirstSignal,
+  ensureNearSignals,
+  despawnFarSignals,
+  saveSignals,
+  loadSignals,
+} from './spawner.js';
+import { updateSearch, resetSearch, isSearching, pulseIntervalMs } from './search.js';
 import { ensureTerrain, terrainStatus } from './terrain.js';
 import { updateBehaviours, isHidden } from './behaviours.js';
 import { isNight } from './sun.js';
@@ -36,7 +46,13 @@ const state = {
   night: false,
   terrainAnnounced: false,
   spawnsStarted: false,
+  signalTarget: 0,        // overall signal count to top up to (re-rolled on capture / despawn)
+  nextFieldCheckAt: 0,    // throttle for despawn + top-up checks
+  lastSavedAt: 0,
 };
+
+const FIELD_CHECK_MS = 5000;
+const SAVE_EVERY_MS = 5000;
 
 let stopWatchingPosition = null;
 let stopWatchingHeading = null;
@@ -75,7 +91,15 @@ function recomputeSignal(sig) {
 function topUpSignals() {
   if (!state.playerPos || !state.spawnsStarted) return;
   state.night = isNight(state.playerPos);
-  const added = refillSignals(state.activeSignals, state.playerPos, { night: state.night });
+  if (!state.signalTarget) state.signalTarget = rollSignalTarget();
+  const ctx = { night: state.night, currentId: state.currentSignalId };
+  // 1–2 always within 150m first, then fill the rest of the field.
+  const near = ensureNearSignals(state.activeSignals, state.playerPos, ctx);
+  for (const sig of near.removed) analytics.signalGone(sig.id, 'made-room');
+  const added = [
+    ...near.added,
+    ...refillSignals(state.activeSignals, state.playerPos, { ...ctx, target: state.signalTarget }),
+  ];
   for (const sig of added) analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
   if (!state.currentSignalId && state.activeSignals[0]) {
     state.currentSignalId = nearestSignal()?.id || state.activeSignals[0].id;
@@ -97,6 +121,73 @@ function announceLegendary(sig) {
   ui.showLegendaryEvent(speciesById(sig.speciesId), sig, () => selectSignal(sig.id, true));
 }
 
+/**
+ * Periodic field upkeep while walking: drop signals left far behind and
+ * keep the area around the player populated.
+ */
+function maintainField() {
+  if (!state.playerPos || !state.spawnsStarted) return;
+  const now = Date.now();
+  if (now < state.nextFieldCheckAt) return;
+  state.nextFieldCheckAt = now + FIELD_CHECK_MS;
+
+  const gone = despawnFarSignals(state.activeSignals, state.playerPos);
+  for (const sig of gone) analytics.signalGone(sig.id, 'left-behind');
+  if (gone.some((s) => s.id === state.currentSignalId)) {
+    state.currentSignalId = null;
+    ui.showToast('SIGNAL OUT OF RANGE — SWITCHED TO THE NEAREST ONE', { ms: 3500, kind: 'info' });
+  }
+  if (gone.length) state.signalTarget = rollSignalTarget();
+
+  const before = state.activeSignals.length;
+  topUpSignals();
+  const short =
+    state.activeSignals.length < state.signalTarget ||
+    !state.activeSignals.some((s) => distanceM(state.playerPos, s.pos) <= CONFIG.nearRadiusM);
+  // Nothing could be placed (e.g. no safe ground nearby) — back off a while.
+  if (short && state.activeSignals.length === before) state.nextFieldCheckAt = now + CONFIG.topUpRetryMs;
+}
+
+/** Place the session's guaranteed close first signal, then the rest. */
+function placeFirstSignals() {
+  state.night = isNight(state.playerPos);
+  const first = spawnFirstSignal(state.playerPos, { night: state.night });
+  if (first) {
+    state.activeSignals.push(first);
+    analytics.signalDetected(first, distanceM(state.playerPos, first.pos));
+    state.currentSignalId = first.id;
+    state.huntStartPos = state.playerPos;
+    analytics.signalTracked(first.id, 'auto');
+  }
+  state.signalTarget = rollSignalTarget();
+  topUpSignals();
+}
+
+/** Bring back signals from a restart less than CONFIG.signalPersistMs ago. */
+function restoreSignals() {
+  const saved = loadSignals(state.playerPos, { night: isNight(state.playerPos) });
+  if (!saved) return false;
+  state.activeSignals = saved.signals;
+  state.signalTarget = Math.max(saved.signals.length, CONFIG.minActiveSignals);
+  for (const sig of saved.signals) analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
+  if (saved.currentId) {
+    state.currentSignalId = saved.currentId;
+    state.huntStartPos = state.playerPos;
+    analytics.signalTracked(saved.currentId, 'restored');
+  }
+  topUpSignals();
+  if (terrainStatus() !== 'failed') ui.showToast(`◉ ${saved.signals.length} SIGNAL${saved.signals.length === 1 ? '' : 'S'} STILL ACTIVE FROM YOUR LAST HUNT`, { ms: 3500, kind: 'info' });
+  return true;
+}
+
+function persistSignals(force) {
+  if (!state.spawnsStarted) return;
+  const now = Date.now();
+  if (!force && now - state.lastSavedAt < SAVE_EVERY_MS) return;
+  state.lastSavedAt = now;
+  saveSignals(state.activeSignals, state.currentSignalId);
+}
+
 /** First GPS fix: load OSM terrain (briefly), then place the first signals. */
 async function startSpawning() {
   ui.showToast('SCANNING TERRAIN — MAPPING PARKS, PATHS & WATER…', { ms: 0, kind: 'info' });
@@ -107,7 +198,9 @@ async function startSpawning() {
   ]);
   state.spawnsStarted = true;
   announceTerrain();
-  topUpSignals();
+  const restored = restoreSignals();
+  if (!restored) placeFirstSignals();
+  persistSignals(true);
   tick();
 }
 
@@ -135,6 +228,7 @@ function handleBehaviourEvents(events) {
     const name = sig.revealedClues.length ? species.name : 'The signal';
     if (type === 'fled' || type === 'hid') analytics.behaviourEvent(type, sig.id);
     if (type === 'expired' || type === 'dawn') analytics.signalGone(sig.id, type === 'expired' ? 'faded' : 'dawn');
+    if (type === 'fled' || type === 'reappeared') resetSearch(sig);
     if (type === 'fled') {
       if (navigator.vibrate) navigator.vibrate([40, 30, 40, 30, 160]);
       ui.showToast(`⚡ IT NOTICED YOU! ${name.toUpperCase()} BOLTED — FOLLOW THE SIGNAL`, { ms: 4000, kind: 'alert' });
@@ -229,9 +323,54 @@ function tick() {
     if (night && state.spawnsStarted) ui.showToast('☾ NIGHT HAS FALLEN — NEW SIGNALS ARE STIRRING', { ms: 4500, kind: 'info' });
   }
   handleBehaviourEvents(updateBehaviours(state.activeSignals, state.playerPos, { night }));
+  maintainField();
   for (const sig of state.activeSignals) recomputeSignal(sig);
+  const cur = currentSignal();
+  if (cur) handleSearchEvents(cur, updateSearch(cur));
+  if (isSearching(cur) && !pulseTimer) schedulePulse();
   analytics.tick(state.activeSignals);
+  persistSignals(false);
   refreshCurrentScreen();
+}
+
+/* ------------------------------------------------------------------ */
+/* The final approach: Search stage (hot/cold)                          */
+/* ------------------------------------------------------------------ */
+
+function handleSearchEvents(sig, events) {
+  for (const { type } of events) {
+    analytics.searchEvent(type, sig.id);
+    if (type === 'entered') {
+      if (navigator.vibrate) navigator.vibrate([120, 60, 120, 60, 260]);
+      ui.showToast('◎ IN THE SEARCH AREA — IT\'S CLOSE. FOLLOW THE PULSES: FASTER = WARMER', { ms: 4500, kind: 'search' });
+    } else if (type === 'colder') {
+      if (navigator.vibrate) navigator.vibrate(320);
+      ui.showToast('❄ COLDER — YOU\'RE MOVING AWAY', { ms: 2500, kind: 'cold' });
+    } else if (type === 'left') {
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      ui.showToast('↩ YOU LEFT THE SEARCH AREA — HEAD BACK TOWARDS THE SIGNAL', { ms: 3500, kind: 'cold' });
+    }
+  }
+}
+
+// Pulses speed up as you close in. Runs on its own timer (the game tick is
+// too slow for this), and stops itself once you're no longer searching.
+let pulseTimer = null;
+function schedulePulse() {
+  clearTimeout(pulseTimer);
+  pulseTimer = null;
+  const sig = currentSignal();
+  if (!isSearching(sig)) return;
+  pulseTimer = setTimeout(() => {
+    pulseTimer = null;
+    const s = currentSignal();
+    if (!isSearching(s)) return;
+    if (!document.hidden) {
+      if (navigator.vibrate) navigator.vibrate(s._distanceM <= CONFIG.captureRangeM ? 70 : 35);
+      ui.searchPulse(pulseIntervalMs(s._distanceM));
+    }
+    schedulePulse();
+  }, pulseIntervalMs(sig._distanceM));
 }
 
 /* ------------------------------------------------------------------ */
@@ -273,6 +412,7 @@ function attemptCapture() {
   // ("Another signal detected...", GDD section 46) without forcing a
   // separate screen.
   state.currentSignalId = null;
+  state.signalTarget = rollSignalTarget();
   topUpSignals();
   const next = nearestSignal();
   state.currentSignalId = next ? next.id : null;
@@ -281,6 +421,7 @@ function attemptCapture() {
 
   if (species.rarity === 'legendary' && navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 100, 50, 400]);
   ui.showCaptureSuccessBanner(species, isFirst);
+  persistSignals(true);
   refreshCurrentScreen();
   setTimeout(() => ui.hideCaptureSuccessBanner(), 4500);
 }
@@ -516,6 +657,9 @@ function downloadBlobUrl(url, filename) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
+
+document.addEventListener('visibilitychange', () => { if (document.hidden) persistSignals(true); });
+window.addEventListener('pagehide', () => persistSignals(true));
 
 function registerServiceWorker() {
   if ('serviceWorker' in navigator) {

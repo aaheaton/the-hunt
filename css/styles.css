@@ -866,3 +866,30 @@ body.is-night #hdr-status::after { content: ' • ☾ NIGHT'; color: #C9A7FF; }
 .pt-bar-n { text-align: right; color: var(--text-primary); }
 .btn-text-danger { background: none; border: none; color: var(--text-muted); font-family: var(--font-display); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; padding: 10px; margin-top: 4px; cursor: pointer; }
 .btn-text-danger:active { color: #ff6b6b; }
+
+/* ------------------------------------------------------------------ */
+/* Search stage — hot/cold final approach                               */
+/* ------------------------------------------------------------------ */
+#screen-scanner { --temp: var(--rarity-epic); }
+#screen-scanner[data-temp="warm"] { --temp: #FF9F1C; }
+#screen-scanner[data-temp="hot"] { --temp: #FF6B2C; }
+#screen-scanner[data-temp="burning"],
+#screen-scanner[data-temp="onit"] { --temp: #FF3864; }
+#screen-scanner[data-temp="cold"] { --temp: #00E5FF; }
+.search-pulse {
+  position: absolute; left: 50%; top: 50%; width: 60px; height: 60px;
+  margin: -30px 0 0 -30px; border-radius: 50%; pointer-events: none;
+  border: 3px solid var(--temp); opacity: 0; display: none;
+}
+#screen-scanner.searching .search-pulse { display: block; }
+.search-pulse.go { animation: search-ping 600ms ease-out forwards; }
+@keyframes search-ping {
+  0% { transform: scale(0.5); opacity: 0.95; box-shadow: 0 0 18px var(--temp); }
+  100% { transform: scale(3.6); opacity: 0; box-shadow: 0 0 0 transparent; }
+}
+#screen-scanner.searching .radar-readout .dist-num { color: var(--temp); text-shadow: 0 0 14px var(--temp); letter-spacing: 0.04em; }
+#screen-scanner.searching .status-pill { color: var(--temp); border-color: var(--temp); }
+#screen-scanner.searching .range-chip { color: var(--temp); border-color: var(--temp); }
+#screen-scanner.searching .radar-dial svg.sweep { opacity: 0.35; }
+.event-toast.kind-search { border-color: #FF9F1C; color: #FFE2B8; box-shadow: 0 0 0 1px rgba(255,159,28,0.35), 0 0 22px rgba(255,159,28,0.25); }
+.event-toast.kind-cold { border-color: #00E5FF; color: #C8F7FF; box-shadow: 0 0 0 1px rgba(0,229,255,0.3), 0 8px 24px rgba(0,0,0,0.5); }

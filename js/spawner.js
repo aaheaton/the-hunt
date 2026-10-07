@@ -14,10 +14,12 @@
 
 import { CONFIG } from './config.js';
 import { rollSpecies, spawnableSpecies, speciesById } from './characters.js';
-import { randomPointInRadius, destinationPoint, distanceM } from './geo.js';
+import { destinationPoint, distanceM } from './geo.js';
 import { findSpawnPoint, findPointNear, habitatsNear, terrainStatus } from './terrain.js';
 
+// Ids must stay unique across reloads, because signals are persisted.
 let nextId = 1;
+const idPrefix = Date.now().toString(36);
 
 // Testing override: ?spawn=<speciesId> forces the first spawn to be that
 // species (ignores the night gate, still uses safe terrain placement).
@@ -29,22 +31,21 @@ function habitatsFor(species) {
   return species.spawnHabitats || ['any'];
 }
 
-/** Random (unchecked) zone centre — the pre-terrain fallback. */
-function randomZoneCenter(playerPos) {
+/** Random (unchecked) point minD–maxD from the player — the pre-terrain fallback. */
+function randomPoint(playerPos, minD, maxD) {
   const bearing = Math.random() * 360;
-  const dist =
-    CONFIG.spawnMinDistanceM +
-    Math.random() * (CONFIG.spawnMaxDistanceM - CONFIG.spawnMinDistanceM);
-  return destinationPoint(playerPos, bearing, dist);
+  return destinationPoint(playerPos, bearing, minD + Math.random() * (maxD - minD));
 }
 
-function makeSignal(species, zoneCenter, pos, habitat, unchecked) {
+function makeSignal(species, pos, habitat, unchecked) {
   const now = Date.now();
   return {
-    id: `sig-${nextId++}`,
+    id: `sig-${idPrefix}-${nextId++}`,
     speciesId: species.id,
-    zoneCenter,
-    pos,
+    // The search zone is centred on the spawn point; wanderers / hiders
+    // move around inside it.
+    zoneCenter: { lat: pos.lat, lng: pos.lng },
+    pos: { lat: pos.lat, lng: pos.lng },
     habitat,
     unchecked,
     behavior: species.behavior,
@@ -62,65 +63,69 @@ function makeSignal(species, zoneCenter, pos, habitat, unchecked) {
 }
 
 /**
- * Try to create a signal for one species. Returns the signal or null if the
- * species has no safe spot in its habitat nearby.
+ * Try to create a signal for one species minD–maxD from the player (measured
+ * to the creature's true position). Returns the signal, or null if the
+ * species has no safe spot in its habitat in that ring.
  */
-function trySpawnSpecies(species, playerPos) {
-  const spot = findSpawnPoint(
-    playerPos,
-    habitatsFor(species),
-    CONFIG.spawnMinDistanceM,
-    CONFIG.spawnMaxDistanceM
-  );
-
+function trySpawnSpecies(species, playerPos, minD, maxD, tries) {
+  // Small rings need more random candidates to land a hit.
+  const n = tries || (maxD <= 160 ? 200 : CONFIG.terrainSpawnTries);
+  const spot = findSpawnPoint(playerPos, habitatsFor(species), minD, maxD, n);
   if (spot === undefined) {
     // No terrain data: old behaviour, flagged unchecked.
-    const zoneCenter = randomZoneCenter(playerPos);
-    const pos = randomPointInRadius(zoneCenter, CONFIG.searchZoneRadiusM);
-    return makeSignal(species, zoneCenter, pos, species.habitat, true);
+    return makeSignal(species, randomPoint(playerPos, minD, maxD), species.habitat, true);
   }
   if (!spot) return null;
-
-  const zoneCenter = { lat: spot.lat, lng: spot.lng };
-  // The true position wanders inside the search zone but must stay safe
-  // (and in-habitat where possible).
-  const pos =
-    findPointNear(zoneCenter, 0, CONFIG.searchZoneRadiusM, { habitat: spot.habitat, tries: 25 }) ||
-    zoneCenter;
-  return makeSignal(species, zoneCenter, pos, spot.habitat, false);
+  return makeSignal(species, { lat: spot.lat, lng: spot.lng }, spot.habitat, false);
 }
 
 /**
  * Create a brand-new signal near the player, or null if nothing can spawn.
- * @param {object} ctx { night: boolean, existing: Array }
+ * @param {object} ctx { night, existing, minD, maxD, noLegendary }
  */
 export function spawnSignal(playerPos, ctx = {}) {
   const night = !!ctx.night;
   const existing = ctx.existing || [];
+  const minD = ctx.minD ?? CONFIG.spawnMinDistanceM;
+  const maxD = ctx.maxD ?? CONFIG.spawnMaxDistanceM;
   const legendaryActive = existing.filter((s) => s.legendary).length;
 
   if (forcedSpawn) {
     const species = speciesById(forcedSpawn);
     forcedSpawn = null;
     if (species) {
-      const sig = trySpawnSpecies(species, playerPos);
+      const sig = trySpawnSpecies(species, playerPos, minD, maxD);
       if (sig) return sig;
     }
   }
 
   // Only species whose habitat actually exists nearby (when terrain is known).
-  const habitats = habitatsNear(playerPos, CONFIG.spawnMaxDistanceM);
+  const habitats = habitatsNear(playerPos, maxD);
   let pool = spawnableSpecies({ night }).filter((s) => {
-    if (s.rarity === 'legendary' && legendaryActive >= CONFIG.maxActiveLegendary) return false;
+    if (s.rarity === 'legendary' && (ctx.noLegendary || legendaryActive >= CONFIG.maxActiveLegendary)) return false;
     if (!habitats) return true;
     return habitatsFor(s).some((h) => habitats[h]);
   });
 
   for (let attempt = 0; attempt < 6 && pool.length; attempt++) {
     const species = rollSpecies(pool, night ? CONFIG.nightSpeciesWeightMultiplier : 1);
-    const sig = trySpawnSpecies(species, playerPos);
+    const sig = trySpawnSpecies(species, playerPos, minD, maxD);
     if (sig) return sig;
     pool = pool.filter((s) => s !== species); // no room for this one here
+  }
+  return null;
+}
+
+/**
+ * The guaranteed close first signal of a session (~25–50m). If there's no
+ * safe spot that close, widen the ring step by step rather than give up.
+ * Never a legendary (that should stay an event, not a freebie).
+ */
+export function spawnFirstSignal(playerPos, ctx = {}) {
+  const minD = CONFIG.firstSignalMinDistanceM;
+  for (const maxD of [CONFIG.firstSignalMaxDistanceM, 80, CONFIG.nearRadiusM]) {
+    const sig = spawnSignal(playerPos, { ...ctx, minD, maxD, noLegendary: true });
+    if (sig) return sig;
   }
   return null;
 }
@@ -143,14 +148,18 @@ export function wanderTick(signals) {
   }
 }
 
+/** Roll a random overall signal target between min and max (inclusive). */
+export function rollSignalTarget() {
+  const { minActiveSignals: min, maxActiveSignals: max } = CONFIG;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
 /**
- * Top up the active signal list to a random target between
- * CONFIG.minActiveSignals and CONFIG.maxActiveSignals (inclusive).
- * Returns the newly-added signals.
+ * Top up the active signal list to `ctx.target` (rolled by the caller so it
+ * doesn't change every tick). Returns the newly-added signals.
  */
 export function refillSignals(activeSignals, playerPos, ctx = {}) {
-  const { minActiveSignals: min, maxActiveSignals: max } = CONFIG;
-  const target = min + Math.floor(Math.random() * (max - min + 1));
+  const target = ctx.target ?? rollSignalTarget();
   const added = [];
   let failures = 0;
   while (activeSignals.length < target && failures < 4) {
@@ -160,6 +169,101 @@ export function refillSignals(activeSignals, playerPos, ctx = {}) {
     added.push(sig);
   }
   return added;
+}
+
+/**
+ * Keep 1–2 signals within CONFIG.nearRadiusM of the player. When none are
+ * that close, spawn up to a random 1–2 in the 40–150m ring. If the list is
+ * already at its maximum, the furthest signal that isn't being tracked (and
+ * isn't a legendary) makes room. Returns { added, removed }.
+ */
+export function ensureNearSignals(activeSignals, playerPos, ctx = {}) {
+  const added = [];
+  const removed = [];
+  const near = activeSignals.filter((s) => distanceM(playerPos, s.pos) <= CONFIG.nearRadiusM).length;
+  if (near >= CONFIG.nearMinSignals) return { added, removed };
+
+  const { nearMinSignals: min, nearMaxSignals: max } = CONFIG;
+  const want = min + Math.floor(Math.random() * (max - min + 1)) - near;
+  for (let i = 0; i < want; i++) {
+    const sig = spawnSignal(playerPos, {
+      ...ctx,
+      existing: activeSignals,
+      minD: CONFIG.spawnMinDistanceM,
+      maxD: CONFIG.nearRadiusM,
+      noLegendary: true,
+    });
+    if (!sig) break;
+    if (activeSignals.length >= CONFIG.maxActiveSignals) {
+      const victim = activeSignals
+        .filter((s) => s.id !== ctx.currentId && !s.legendary)
+        .sort((a, b) => distanceM(playerPos, b.pos) - distanceM(playerPos, a.pos))[0];
+      if (!victim) break;
+      activeSignals.splice(activeSignals.indexOf(victim), 1);
+      removed.push(victim);
+    }
+    activeSignals.push(sig);
+    added.push(sig);
+  }
+  return { added, removed };
+}
+
+/** Remove (and return) signals the player has left more than CONFIG.despawnDistanceM behind. */
+export function despawnFarSignals(activeSignals, playerPos) {
+  const gone = activeSignals.filter((s) => distanceM(playerPos, s.pos) > CONFIG.despawnDistanceM);
+  for (const s of gone) activeSignals.splice(activeSignals.indexOf(s), 1);
+  return gone;
+}
+
+/* ------------------------------------------------------------------ */
+/* Persistence across short restarts                                    */
+/* ------------------------------------------------------------------ */
+
+/** Save the live signal list (minus per-tick scratch fields). */
+export function saveSignals(activeSignals, currentId) {
+  try {
+    const signals = activeSignals.map((s) =>
+      Object.fromEntries(Object.entries(s).filter(([k]) => !k.startsWith('_')))
+    );
+    localStorage.setItem(
+      CONFIG.storage.activeSignals,
+      JSON.stringify({ savedAt: Date.now(), currentId, signals })
+    );
+  } catch (err) {
+    console.warn('Failed saving signals', err);
+  }
+}
+
+/**
+ * Load signals saved less than CONFIG.signalPersistMs ago. Drops any that
+ * have expired, or are now out of despawn range of the player. Returns
+ * { signals, currentId } or null.
+ */
+export function loadSignals(playerPos, { night = false } = {}) {
+  try {
+    const raw = localStorage.getItem(CONFIG.storage.activeSignals);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    const now = Date.now();
+    if (!data || !Array.isArray(data.signals) || now - data.savedAt > CONFIG.signalPersistMs) {
+      localStorage.removeItem(CONFIG.storage.activeSignals);
+      return null;
+    }
+    const signals = data.signals.filter(
+      (s) =>
+        speciesById(s.speciesId) &&
+        s.pos && isFinite(s.pos.lat) &&
+        !(s.expiresAt && now >= s.expiresAt) &&
+        !(s.nightOnly && !night) &&
+        distanceM(playerPos, s.pos) <= CONFIG.despawnDistanceM
+    );
+    if (!signals.length) return null;
+    const currentId = signals.some((s) => s.id === data.currentId) ? data.currentId : null;
+    return { signals, currentId };
+  } catch (err) {
+    console.warn('Failed loading signals', err);
+    return null;
+  }
 }
 
 export { terrainStatus };

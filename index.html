@@ -120,10 +120,11 @@
       <div class="radar-cardinal"><span class="n">N</span><span>S</span></div>
       <div class="radar-cardinal-h"><span>W</span><span>E</span></div>
       <div id="radar-blip-layer"></div>
+      <div id="search-pulse" class="search-pulse" aria-hidden="true"></div>
       <div class="radar-center"><svg id="radar-center-arrow" class="icon" viewBox="0 0 24 24" fill="none"><path d="M12 2 L19 20 L12 16 L5 20 Z" fill="currentColor"/></svg></div>
     </div>
     <div class="radar-readout">
-      <div class="dist-row"><span class="dist-num" id="radar-distance">—</span><span class="dist-unit">METRES</span></div>
+      <div class="dist-row"><span class="dist-num" id="radar-distance">—</span><span class="dist-unit" id="radar-dist-unit">METRES</span></div>
       <div class="radius-row">ESTIMATED SEARCH RADIUS: <strong id="radar-radius">± —</strong></div>
     </div>
     <div class="status-pill" id="scanner-status">AWAITING GPS LOCK</div>

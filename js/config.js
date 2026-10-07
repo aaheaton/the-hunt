@@ -4,8 +4,26 @@
 
 export const CONFIG = {
   // How far out a new signal can spawn from the player when a hunt starts.
-  spawnMinDistanceM: 60,
+  // Measured to the creature's true position.
+  spawnMinDistanceM: 40,
   spawnMaxDistanceM: 450,
+
+  // The first signal of every session is placed close, so the very first
+  // hunt fits in a couple of minutes (playtest 2026-10-06: nearest signal
+  // was never under 100m and nobody captured anything).
+  firstSignalMinDistanceM: 25,   // outside runner/hider trigger range
+  firstSignalMaxDistanceM: 50,
+
+  // Keep the field populated as the player walks (playtest: signals were
+  // left behind and the area emptied out).
+  despawnDistanceM: 500,         // signals further than this are removed
+  nearRadiusM: 150,              // always keep some signals within this…
+  nearMinSignals: 1,             // …at least this many…
+  nearMaxSignals: 2,             // …topping up to a random 1–2 when short
+  topUpRetryMs: 20 * 1000,       // wait this long after a failed top-up
+
+  // Signals survive short app restarts / reloads for this long.
+  signalPersistMs: 30 * 60 * 1000,
 
   // The "search zone" a character wanders inside — its true position is
   // never the exact spawn point, it's randomized within this radius of it.
@@ -16,6 +34,18 @@ export const CONFIG = {
   // radius aren't detected at all yet. Also doubles as the Map screen's
   // radar view radius, so the map and scanner always agree on "in range".
   scannerRangeM: 500,
+
+  // --- The final approach: "Search" stage (GDD §3) ---
+  // Entering the search area (within searchZoneRadiusM of the creature)
+  // fires "IN THE SEARCH AREA" + vibration and switches the scanner to
+  // hot/cold feedback instead of exact metres.
+  searchExitM: 45,               // hysteresis: count as "left" beyond this
+  searchHideDistance: true,      // hide exact metres/bearing while searching
+  searchPulseMaxMs: 1600,        // pulse interval at the zone edge (35m)…
+  searchPulseMinMs: 250,         // …down to this at capture range
+  searchWarmerStepM: 3,          // smoothed distance must drop this much for "warmer"
+  searchColderStepM: 4,          // …or rise this much for a "colder" warning
+  searchColderToastMs: 6000,     // min gap between "colder" toasts
 
   // Distance thresholds that change what the scanner shows.
   veryCloseM: 20,
