@@ -32,8 +32,10 @@ function habitatsFor(species) {
 }
 
 /** Random (unchecked) point minD–maxD from the player — the pre-terrain fallback. */
-function randomPoint(playerPos, minD, maxD) {
-  const bearing = Math.random() * 360;
+function randomPoint(playerPos, minD, maxD, cone = null) {
+  const bearing = cone
+    ? cone.centerDeg + (Math.random() * 2 - 1) * cone.halfDeg
+    : Math.random() * 360;
   return destinationPoint(playerPos, bearing, minD + Math.random() * (maxD - minD));
 }
 
@@ -67,13 +69,13 @@ function makeSignal(species, pos, habitat, unchecked) {
  * to the creature's true position). Returns the signal, or null if the
  * species has no safe spot in its habitat in that ring.
  */
-function trySpawnSpecies(species, playerPos, minD, maxD, tries) {
+function trySpawnSpecies(species, playerPos, minD, maxD, tries, cone = null) {
   // Small rings need more random candidates to land a hit.
   const n = tries || (maxD <= 160 ? 200 : CONFIG.terrainSpawnTries);
-  const spot = findSpawnPoint(playerPos, habitatsFor(species), minD, maxD, n);
+  const spot = findSpawnPoint(playerPos, habitatsFor(species), minD, maxD, n, cone);
   if (spot === undefined) {
     // No terrain data: old behaviour, flagged unchecked.
-    return makeSignal(species, randomPoint(playerPos, minD, maxD), species.habitat, true);
+    return makeSignal(species, randomPoint(playerPos, minD, maxD, cone), species.habitat, true);
   }
   if (!spot) return null;
   return makeSignal(species, { lat: spot.lat, lng: spot.lng }, spot.habitat, false);
@@ -81,7 +83,8 @@ function trySpawnSpecies(species, playerPos, minD, maxD, tries) {
 
 /**
  * Create a brand-new signal near the player, or null if nothing can spawn.
- * @param {object} ctx { night, existing, minD, maxD, noLegendary }
+ * @param {object} ctx { night, existing, minD, maxD, noLegendary, cone }
+ *   cone: optional { centerDeg, halfDeg } — only place within this compass arc.
  */
 export function spawnSignal(playerPos, ctx = {}) {
   const night = !!ctx.night;
@@ -94,7 +97,7 @@ export function spawnSignal(playerPos, ctx = {}) {
     const species = speciesById(forcedSpawn);
     forcedSpawn = null;
     if (species) {
-      const sig = trySpawnSpecies(species, playerPos, minD, maxD);
+      const sig = trySpawnSpecies(species, playerPos, minD, maxD, undefined, ctx.cone);
       if (sig) return sig;
     }
   }
@@ -109,7 +112,7 @@ export function spawnSignal(playerPos, ctx = {}) {
 
   for (let attempt = 0; attempt < 6 && pool.length; attempt++) {
     const species = rollSpecies(pool, night ? CONFIG.nightSpeciesWeightMultiplier : 1);
-    const sig = trySpawnSpecies(species, playerPos, minD, maxD);
+    const sig = trySpawnSpecies(species, playerPos, minD, maxD, undefined, ctx.cone);
     if (sig) return sig;
     pool = pool.filter((s) => s !== species); // no room for this one here
   }
@@ -128,6 +131,46 @@ export function spawnFirstSignal(playerPos, ctx = {}) {
     if (sig) return sig;
   }
   return null;
+}
+
+/** Facing cones to try, narrowest first, ending with "any direction". */
+function frontCones(heading) {
+  if (heading == null || !isFinite(heading)) return [null];
+  return [CONFIG.frontConeHalfDeg, ...CONFIG.frontConeFallbackDeg]
+    .map((halfDeg) => ({ centerDeg: heading, halfDeg }))
+    .concat([null]);
+}
+
+/**
+ * Start-up spawn: at least CONFIG.frontSpawnCount signals in front of the
+ * player (around compass `heading`). The first is the guaranteed close first
+ * signal (25–50m, widening if needed); the others sit within nearRadiusM.
+ * Each one tries the narrow front cone, then a wider cone, and only then any
+ * direction. With no heading this is just the old directionless spawn.
+ * Returns the new signals (first = the close one), never legendaries.
+ */
+export function spawnStartupSignals(playerPos, heading, ctx = {}) {
+  const out = [];
+  const cones = frontCones(heading);
+  const place = (minD, maxDs) => {
+    for (const cone of cones) {
+      for (const maxD of maxDs) {
+        const sig = spawnSignal(playerPos, {
+          ...ctx, existing: out, minD, maxD, noLegendary: true, cone,
+        });
+        if (sig) { sig.frontSpawn = !!cone; return sig; }
+      }
+    }
+    return null;
+  };
+  const first = place(CONFIG.firstSignalMinDistanceM, [CONFIG.firstSignalMaxDistanceM, 80, CONFIG.nearRadiusM]);
+  if (first) out.push(first);
+  while (out.length < CONFIG.frontSpawnCount) {
+    const sig = place(CONFIG.spawnMinDistanceM, [CONFIG.nearRadiusM]);
+    if (!sig) break;
+    out.push(sig);
+  }
+  return out;
 }
 
 /**

@@ -14,6 +14,19 @@ export const CONFIG = {
   firstSignalMinDistanceM: 25,   // outside runner/hider trigger range
   firstSignalMaxDistanceM: 50,
 
+  // On start-up, at least this many signals are placed in FRONT of the
+  // player (within ±frontConeHalfDeg of their compass heading), so the
+  // first thing they see on the scanner is "ahead of you" rather than
+  // "turn around". If no safe spot exists in the cone the cone widens
+  // (frontConeFallbackDeg) and finally falls back to any direction.
+  // The first front signal is the close first signal (25–50m); the rest
+  // go out to nearRadiusM. Needs a compass heading — without one
+  // (desktop / no sensor) spawning is directionless as before.
+  frontSpawnCount: 2,
+  frontConeHalfDeg: 40,
+  frontConeFallbackDeg: [70],
+  headingWaitMs: 2500,           // max extra wait for a first compass reading
+
   // Keep the field populated as the player walks (playtest: signals were
   // left behind and the area emptied out).
   despawnDistanceM: 500,         // signals further than this are removed

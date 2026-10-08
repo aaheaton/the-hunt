@@ -10,7 +10,7 @@ import {
   wanderTick,
   refillSignals,
   rollSignalTarget,
-  spawnFirstSignal,
+  spawnStartupSignals,
   ensureNearSignals,
   despawnFarSignals,
   saveSignals,
@@ -148,13 +148,20 @@ function maintainField() {
   if (short && state.activeSignals.length === before) state.nextFieldCheckAt = now + CONFIG.topUpRetryMs;
 }
 
-/** Place the session's guaranteed close first signal, then the rest. */
+/**
+ * Place the session's start-up signals — the guaranteed close first signal
+ * plus at least one more, all in front of the way the player is facing
+ * (CONFIG.frontSpawnCount) — then fill the rest of the field.
+ */
 function placeFirstSignals() {
   state.night = isNight(state.playerPos);
-  const first = spawnFirstSignal(state.playerPos, { night: state.night });
+  const startup = spawnStartupSignals(state.playerPos, state.playerHeading, { night: state.night });
+  for (const sig of startup) {
+    state.activeSignals.push(sig);
+    analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
+  }
+  const first = startup[0];
   if (first) {
-    state.activeSignals.push(first);
-    analytics.signalDetected(first, distanceM(state.playerPos, first.pos));
     state.currentSignalId = first.id;
     state.huntStartPos = state.playerPos;
     analytics.signalTracked(first.id, 'auto');
@@ -196,6 +203,12 @@ async function startSpawning() {
     ensureTerrain(state.playerPos),
     new Promise((r) => setTimeout(r, CONFIG.terrainTimeoutMs + 2000)),
   ]);
+  // Front-facing start-up spawns need a compass reading; give the sensor a
+  // moment if it hasn't reported yet (desktop / no compass just proceeds).
+  const headingDeadline = Date.now() + CONFIG.headingWaitMs;
+  while (state.playerHeading == null && Date.now() < headingDeadline) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
   state.spawnsStarted = true;
   announceTerrain();
   const restored = restoreSignals();

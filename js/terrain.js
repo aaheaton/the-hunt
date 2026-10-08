@@ -23,6 +23,7 @@
 // the maths simple and fast enough to run hundreds of checks per tick.
 
 import { CONFIG } from './config.js';
+import { angleDiff, bearingDeg } from './geo.js';
 
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -525,10 +526,13 @@ function candidateFor(t, habitat, px, py, maxD) {
  * one of `habitats` (tried in order). Returns { lat, lng, habitat } or null.
  * Returns undefined when terrain isn't loaded (caller falls back to random).
  */
-export function findSpawnPoint(playerPos, habitats, minD, maxD, tries = CONFIG.terrainSpawnTries) {
+export function findSpawnPoint(playerPos, habitats, minD, maxD, tries = CONFIG.terrainSpawnTries, cone = null) {
   if (!current) return undefined;
   const t = current;
   const [px, py] = t.proj.toXY(playerPos.lat, playerPos.lng);
+  // Optional facing cone { centerDeg, halfDeg } — compass bearings, 0 = N.
+  // Rejection-sampled, so give it proportionally more attempts.
+  if (cone) tries = Math.ceil(tries * Math.min(8, 180 / Math.max(5, cone.halfDeg)));
   for (const habitat of habitats) {
     for (let i = 0; i < tries; i++) {
       const c = candidateFor(t, habitat, px, py, maxD);
@@ -537,7 +541,9 @@ export function findSpawnPoint(playerPos, habitats, minD, maxD, tries = CONFIG.t
       const d = Math.hypot(x - px, y - py);
       if (d < minD || d > maxD) continue;
       if (!safeXY(t, x, y) || !habitatXY(t, x, y, habitat)) continue;
-      return { ...t.proj.toLL(x, y), habitat };
+      const ll = t.proj.toLL(x, y);
+      if (cone && Math.abs(angleDiff(cone.centerDeg, bearingDeg(playerPos, ll))) > cone.halfDeg) continue;
+      return { ...ll, habitat };
     }
   }
   return null;
