@@ -1,7 +1,8 @@
 // Creature behaviours that react to the player (GDD §7).
 //
-//   Runner (§7.3) — when you get close it bolts 30–50m, roughly away from
-//                   you, onto another safe spot ("It noticed you!"). After
+//   Runner (§7.3) — when you get close it hops at most 10m, always away from
+//                   you (never towards or behind you), onto another safe
+//                   spot ("It noticed you!"). After
 //                   CONFIG.runnerFlees escapes it's too tired to run again.
 //   Hider  (§7.4) — when you get close it vanishes for 15–30s, then
 //                   reappears on the far side of its search zone, so you have
@@ -20,15 +21,43 @@ function randBetween(a, b) {
   return a + Math.random() * (b - a);
 }
 
-/** Escape point for a runner: 30–50m away, biased away from the player. */
+/** Smallest angle (deg) between two bearings. */
+function angleDiff(a, b) {
+  const d = Math.abs(((a - b) % 360 + 360) % 360);
+  return d > 180 ? 360 - d : d;
+}
+
+/**
+ * A runner escape point is only valid if it is within runnerFleeMaxM of where
+ * the creature was, lies inside the "away from the player" cone, and leaves
+ * the creature further from the player than before — so it can never jump
+ * past, beside or behind the player.
+ */
+function validEscape(from, to, playerPos) {
+  const moved = distanceM(from, to);
+  if (moved < 1 || moved > CONFIG.runnerFleeMaxM) return false;
+  const away = bearingDeg(playerPos, from);
+  if (angleDiff(bearingDeg(from, to), away) > CONFIG.runnerFleeConeDeg) return false;
+  return distanceM(playerPos, to) > distanceM(playerPos, from);
+}
+
+/** Escape point for a runner: ≤10m, directly away from the player. */
 function escapePoint(sig, playerPos) {
-  const p = findPointNear(sig.pos, CONFIG.runnerFleeMinM, CONFIG.runnerFleeMaxM, {
-    habitat: sig.habitat,
-    awayFrom: playerPos,
-  });
-  if (p !== undefined) return p; // terrain loaded: safe spot or null
-  // No terrain: straight away from the player, ±45°.
-  const away = (bearingDeg(playerPos, sig.pos) + randBetween(-45, 45) + 360) % 360;
+  // Terrain loaded: try a few safe, habitat-appropriate spots and keep the
+  // first that passes the hard distance/direction checks.
+  for (let i = 0; i < 8; i++) {
+    const p = findPointNear(sig.pos, CONFIG.runnerFleeMinM, CONFIG.runnerFleeMaxM, {
+      habitat: sig.habitat,
+      awayFrom: playerPos,
+    });
+    if (p === undefined) break;                     // no terrain data — use fallback
+    if (p === null) return null;                    // no safe spot at all: it stays put
+    if (validEscape(sig.pos, p, playerPos)) return p;
+    if (i === 7) return null;                       // nothing valid: it stays put
+  }
+  // No terrain: straight away from the player, within the cone.
+  const cone = CONFIG.runnerFleeConeDeg;
+  const away = (bearingDeg(playerPos, sig.pos) + randBetween(-cone, cone) + 360) % 360;
   return destinationPoint(sig.pos, away, randBetween(CONFIG.runnerFleeMinM, CONFIG.runnerFleeMaxM));
 }
 

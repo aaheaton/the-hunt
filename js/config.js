@@ -104,10 +104,14 @@ export const CONFIG = {
   terrainSpawnTries: 60,
 
   // --- Behaviours (GDD §7) ---
-  // Runner: bolts 30–50m away when you get this close.
+  // Runner: hops a short way (never more than runnerFleeMaxM) directly away
+  // from the player when you get this close — never towards or behind you.
   runnerTriggerM: 25,
-  runnerFleeMinM: 30,
-  runnerFleeMaxM: 50,
+  runnerFleeMinM: 5,
+  runnerFleeMaxM: 10,        // hard cap, enforced in behaviours.js
+  // Escape direction must be within this many degrees of straight "away
+  // from the player", so the runner never ends up beside or behind you.
+  runnerFleeConeDeg: 60,
   runnerFlees: 2,            // then it's too tired to run again
   runnerCooldownMs: 8000,
   // Hider: vanishes when you get this close, reappears elsewhere in its zone.

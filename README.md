@@ -173,7 +173,7 @@ above, add an entry to `SPECIES` in `js/characters.js`, and list the files in `s
 | The Leprechaun | **Hider** — vanishes for 15–30s at 22m, reappears on the far side of its zone (2 times) | Parks | Any time |
 | Rusalka | Wanderer | Water banks, else parks | **Night only** |
 | Naga | Stationary | Water banks | Any time |
-| Blue Men of the Minch | **Runner** — bolts 30–50m away at 25m (2 times, then "too tired") | Water banks | Any time |
+| Blue Men of the Minch | **Runner** — hops up to 10m directly away (never behind you) at 25m (2 times, then "too tired") | Water banks | Any time |
 | Hollow Hart | **Runner**, legendary **event** | Woodland, else parks | **Night only** |
 
 - **Night** = sun more than 6° below the horizon at your real position
