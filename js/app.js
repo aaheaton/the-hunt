@@ -3,7 +3,7 @@
 // / Journal, sharing one live game-state object.
 
 import { CONFIG } from './config.js';
-import { distanceM, bearingDeg } from './geo.js';
+import { distanceM, bearingDeg, angleDiff } from './geo.js';
 import { speciesById } from './characters.js';
 import { requestOrientationPermission, watchPosition, watchHeading } from './sensors.js';
 import {
@@ -15,9 +15,10 @@ import {
   despawnFarSignals,
   saveSignals,
   loadSignals,
+  relocateUncheckedSignals,
 } from './spawner.js';
-import { updateSearch, resetSearch, isSearching, pulseIntervalMs } from './search.js';
-import { ensureTerrain, terrainStatus } from './terrain.js';
+import { updateSearch, resetSearch, isSearching, pulseIntervalMs, captureRangeFor, roughDirection } from './search.js';
+import { ensureTerrain, terrainStatus, terrainSource } from './terrain.js';
 import { updateBehaviours, isHidden } from './behaviours.js';
 import { isNight } from './sun.js';
 import { recenterLiveMap } from './livemap.js';
@@ -35,16 +36,25 @@ import * as analytics from './analytics.js';
 
 const state = {
   playerPos: null,
-  playerHeading: null,
+  playerHeading: null,      // the heading the game uses (see updateHeading)
+  headingSource: 'none',    // 'course' | 'compass' | 'compass-corrected' | 'none'
+  compassHeading: null,     // raw phone compass
+  compassOffset: null,      // learned compass error vs. direction of travel (deg)
+  compassOffsetN: 0,
+  course: null,             // { deg, at } — direction of travel from GPS
+  courseAnchor: null,       // last position a course was measured from
   activeSignals: [],
   currentSignalId: null,
+  trackedBy: null,          // who picked the current signal: 'player' | 'auto' | 'restored'
+  captureReadyId: null,     // signal we've already announced "in capture range" for
+  lastAwayNudgeAt: 0,
   huntStartPos: null,
   sessionDistanceM: 0,
   currentScreen: 'safety',
   arStream: null,
   arFallback: false,
   night: false,
-  terrainAnnounced: false,
+  terrainAnnounced: false, // last terrain status announced to the player
   spawnsStarted: false,
   signalTarget: 0,        // overall signal count to top up to (re-rolled on capture / despawn)
   nextFieldCheckAt: 0,    // throttle for despawn + top-up checks
@@ -76,11 +86,31 @@ function revealCluesFor(sig) {
   });
 }
 
-function recomputeSignal(sig) {
+function recomputeSignal(sig, now = Date.now()) {
   sig._distanceM = distanceM(state.playerPos, sig.pos);
   sig._bearingDeg = bearingDeg(state.playerPos, sig.pos);
   sig._hidden = isHidden(sig);
+  // Capture range widens with poor GPS accuracy, and once you've been in
+  // range it stays capturable for a few seconds so a GPS wobble can't snatch
+  // the button away just as you tap it (playtest 2026-10-15).
+  const range = captureRangeFor(state.playerPos.accuracy);
+  sig._captureRangeM = range;
+  if (!sig._hidden && sig._distanceM <= range) sig._capturableUntil = now + CONFIG.captureLatchMs;
+  sig._canCapture = !sig._hidden && (
+    sig._distanceM <= range ||
+    (now < (sig._capturableUntil || 0) && sig._distanceM <= range + 10)
+  );
   if (!sig._hidden) revealCluesFor(sig);
+}
+
+/** Make `id` the tracked signal. `by`: 'player' | 'auto' | 'restored' | 'auto-retarget'. */
+function trackSignal(id, by) {
+  state.currentSignalId = id;
+  state.huntStartPos = state.playerPos;
+  state.trackedBy = by === 'auto-retarget' ? 'auto' : by;
+  const sig = state.activeSignals.find((s) => s.id === id);
+  if (sig) sig._away = null;
+  if (id) analytics.signalTracked(id, by);
 }
 
 /* ------------------------------------------------------------------ */
@@ -102,9 +132,7 @@ function topUpSignals() {
   ];
   for (const sig of added) analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
   if (!state.currentSignalId && state.activeSignals[0]) {
-    state.currentSignalId = nearestSignal()?.id || state.activeSignals[0].id;
-    state.huntStartPos = state.playerPos;
-    analytics.signalTracked(state.currentSignalId, 'auto');
+    trackSignal(nearestSignal()?.id || state.activeSignals[0].id, 'auto');
   }
   const legendary = added.find((s) => s.legendary);
   if (legendary) announceLegendary(legendary);
@@ -135,6 +163,7 @@ function maintainField() {
   for (const sig of gone) analytics.signalGone(sig.id, 'left-behind');
   if (gone.some((s) => s.id === state.currentSignalId)) {
     state.currentSignalId = null;
+    state.trackedBy = null;
     ui.showToast('SIGNAL OUT OF RANGE — SWITCHED TO THE NEAREST ONE', { ms: 3500, kind: 'info' });
   }
   if (gone.length) state.signalTarget = rollSignalTarget();
@@ -161,11 +190,7 @@ function placeFirstSignals() {
     analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
   }
   const first = startup[0];
-  if (first) {
-    state.currentSignalId = first.id;
-    state.huntStartPos = state.playerPos;
-    analytics.signalTracked(first.id, 'auto');
-  }
+  if (first) trackSignal(first.id, 'auto');
   state.signalTarget = rollSignalTarget();
   topUpSignals();
 }
@@ -177,11 +202,7 @@ function restoreSignals() {
   state.activeSignals = saved.signals;
   state.signalTarget = Math.max(saved.signals.length, CONFIG.minActiveSignals);
   for (const sig of saved.signals) analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
-  if (saved.currentId) {
-    state.currentSignalId = saved.currentId;
-    state.huntStartPos = state.playerPos;
-    analytics.signalTracked(saved.currentId, 'restored');
-  }
+  if (saved.currentId) trackSignal(saved.currentId, 'restored');
   topUpSignals();
   if (terrainStatus() !== 'failed') ui.showToast(`◉ ${saved.signals.length} SIGNAL${saved.signals.length === 1 ? '' : 'S'} STILL ACTIVE FROM YOUR LAST HUNT`, { ms: 3500, kind: 'info' });
   return true;
@@ -218,16 +239,30 @@ async function startSpawning() {
 }
 
 function announceTerrain() {
-  if (state.terrainAnnounced) return;
   const status = terrainStatus();
-  analytics.noteContext({ terrain: status });
+  if (status === state.terrainAnnounced) return;
   if (status === 'ready') {
-    state.terrainAnnounced = true;
-    ui.showToast('TERRAIN MAPPED — SIGNALS LOCKED TO PARKS, PATHS & WATERSIDE', { ms: 3500, kind: 'info' });
+    // Terrain can arrive after signals were placed blind (slow / failed
+    // Overpass): move those onto safe ground now (playtest 2026-10-15).
+    const late = state.activeSignals.some((s) => s.unchecked);
+    analytics.noteContext({ terrain: late || state.terrainAnnounced === 'failed' ? 'ready-late' : 'ready', terrainSource: terrainSource() });
+    state.terrainAnnounced = 'ready';
+    if (late) {
+      const cur = currentSignal();
+      const moved = relocateUncheckedSignals(state.activeSignals, { skipId: isSearching(cur) ? cur.id : null });
+      persistSignals(true);
+      ui.showToast(moved
+        ? `TERRAIN MAPPED — ${moved} SIGNAL${moved === 1 ? '' : 'S'} MOVED ONTO SAFE PATHS & PARKS`
+        : 'TERRAIN MAPPED — SIGNALS ARE NOW SAFETY-CHECKED', { ms: 4000, kind: 'info' });
+    } else {
+      ui.showToast('TERRAIN MAPPED — SIGNALS LOCKED TO PARKS, PATHS & WATERSIDE', { ms: 3500, kind: 'info' });
+    }
   } else if (status === 'failed') {
-    state.terrainAnnounced = true;
-    ui.showToast('⚠ MAP DATA UNAVAILABLE — SIGNALS AREN\'T SAFETY-CHECKED. STAY ON PATHS & WATCH FOR ROADS.', { ms: 7000, kind: 'warn' });
-  } else {
+    if (state.terrainAnnounced === 'ready') return;
+    analytics.noteContext({ terrain: 'failed' });
+    state.terrainAnnounced = 'failed';
+    ui.showToast('⚠ MAP DATA UNAVAILABLE — SIGNALS AREN\'T SAFETY-CHECKED YET. STAY ON PATHS & WATCH FOR ROADS. RETRYING…', { ms: 7000, kind: 'warn' });
+  } else if (!state.terrainAnnounced) {
     ui.hideToast();
   }
 }
@@ -275,6 +310,10 @@ function handleBehaviourEvents(events) {
 function goToScreen(name) {
   state.currentScreen = name;
   analytics.screenChanged(name);
+  if (name === 'capture') {
+    const cur = currentSignal();
+    analytics.captureScreenOpened(!!cur && !!cur._canCapture);
+  }
   ui.showScreen(name);
   if (name === 'capture') {
     startCaptureScreenSensors();
@@ -285,9 +324,7 @@ function goToScreen(name) {
 }
 
 function selectSignal(id, alsoGotoScanner) {
-  state.currentSignalId = id;
-  state.huntStartPos = state.playerPos;
-  analytics.signalTracked(id, 'player');
+  trackSignal(id, 'player');
   if (alsoGotoScanner) goToScreen('scanner');
   else refreshCurrentScreen();
 }
@@ -314,7 +351,8 @@ function refreshCurrentScreen() {
       state.playerPos,
       state.playerHeading,
       state.sessionDistanceM,
-      getLifetimeDistanceM()
+      getLifetimeDistanceM(),
+      state.currentSignalId
     );
   } else if (state.currentScreen === 'capture') {
     ui.renderCaptureScreen(currentSignal(), state.arFallback);
@@ -322,6 +360,7 @@ function refreshCurrentScreen() {
     ui.renderJournal(openDossier);
     ui.renderPlaytestStats(analytics.summary());
   }
+  ui.renderCaptureReady(currentSignal(), state.currentScreen);
 }
 
 /* ------------------------------------------------------------------ */
@@ -337,11 +376,19 @@ function tick() {
   }
   handleBehaviourEvents(updateBehaviours(state.activeSignals, state.playerPos, { night }));
   maintainField();
-  for (const sig of state.activeSignals) recomputeSignal(sig);
-  const cur = currentSignal();
+  const now = Date.now();
+  for (const sig of state.activeSignals) recomputeSignal(sig, now);
+  let cur = currentSignal();
   if (cur) handleSearchEvents(cur, updateSearch(cur));
+  if (cur) handleAwayFromSignal(cur, now);
+  cur = currentSignal();
+  handleCaptureReady(cur);
   if (isSearching(cur) && !pulseTimer) schedulePulse();
-  analytics.tick(state.activeSignals);
+  updateHeading();
+  analytics.tick(state.activeSignals, {
+    headingSource: state.headingSource,
+    accuracyM: state.playerPos.accuracy,
+  });
   persistSignals(false);
   refreshCurrentScreen();
 }
@@ -379,11 +426,135 @@ function schedulePulse() {
     const s = currentSignal();
     if (!isSearching(s)) return;
     if (!document.hidden) {
-      if (navigator.vibrate) navigator.vibrate(s._distanceM <= CONFIG.captureRangeM ? 70 : 35);
-      ui.searchPulse(pulseIntervalMs(s._distanceM));
+      if (navigator.vibrate) navigator.vibrate(s._canCapture ? 70 : 35);
+      ui.searchPulse(pulseIntervalMs(s._distanceM, s._captureRangeM));
     }
     schedulePulse();
-  }, pulseIntervalMs(sig._distanceM));
+  }, pulseIntervalMs(sig._distanceM, sig._captureRangeM));
+}
+
+/* ------------------------------------------------------------------ */
+/* Capture-ready alert (any screen)                                     */
+/* ------------------------------------------------------------------ */
+
+// Playtest 2026-10-15: players reached capture range on the Map screen
+// (where they spent 60% of their time) with no way to know they could
+// capture. Now entering range buzzes, toasts, and shows a "CAPTURE NOW" bar
+// on every screen.
+function handleCaptureReady(sig) {
+  const ready = !!sig && !!sig._canCapture;
+  if (!ready) {
+    state.captureReadyId = null;
+    return;
+  }
+  if (state.captureReadyId === sig.id) return;
+  state.captureReadyId = sig.id;
+  analytics.captureReady(sig.id);
+  if (navigator.vibrate) navigator.vibrate([80, 50, 80, 50, 300]);
+  if (state.currentScreen !== 'capture') {
+    ui.showToast('◉ IN CAPTURE RANGE — TAP "CAPTURE NOW" BEFORE IT SLIPS AWAY', { ms: 4000, kind: 'search' });
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Direction: heading from travel, "moving away" nudge, auto-retarget   */
+/* ------------------------------------------------------------------ */
+
+/** "AHEAD OF YOU" / "BEHIND YOU" / "TO YOUR LEFT" … or a rough compass point. */
+function relativeDirection(bearing) {
+  if (state.playerHeading == null) return `TO THE ${roughDirection(bearing, true)}`;
+  const rel = angleDiff(state.playerHeading, bearing);
+  if (Math.abs(rel) <= 35) return 'AHEAD OF YOU';
+  if (Math.abs(rel) >= 145) return 'BEHIND YOU';
+  return rel > 0 ? 'TO YOUR RIGHT' : 'TO YOUR LEFT';
+}
+
+/**
+ * Playtest 2026-10-15: half of the longer hunts ended further from the
+ * signal than they started. If the (smoothed) distance grows well past the
+ * closest you've been, say so — and if the game chose this signal for you,
+ * swap to one that's actually closer instead.
+ */
+function handleAwayFromSignal(sig, now) {
+  if (sig._hidden || isSearching(sig) || !isFinite(sig._distanceM)) return;
+  const a = (sig._away ||= { ema: sig._distanceM, best: sig._distanceM });
+  a.ema += 0.4 * (sig._distanceM - a.ema);
+  if (a.ema < a.best) a.best = a.ema;
+  if (a.ema - a.best < CONFIG.awayNudgeM) return;
+  if (now - state.lastAwayNudgeAt < CONFIG.awayNudgeCooldownMs) return;
+  state.lastAwayNudgeAt = now;
+  a.best = a.ema;
+
+  if (state.trackedBy === 'auto') {
+    const alt = nearestSignal();
+    if (alt && alt.id !== sig.id && alt._distanceM <= sig._distanceM - CONFIG.autoRetargetGainM) {
+      trackSignal(alt.id, 'auto-retarget');
+      analytics.directionEvent('retarget', sig.id);
+      if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
+      ui.showToast(`↪ SWITCHED TO A CLOSER SIGNAL — ${Math.round(alt._distanceM)}m ${relativeDirection(alt._bearingDeg)}`, { ms: 4000, kind: 'info' });
+      return;
+    }
+  }
+  analytics.directionEvent('away', sig.id);
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  ui.showToast(`↩ YOU'RE MOVING AWAY FROM THE SIGNAL — IT'S ${relativeDirection(sig._bearingDeg)}`, { ms: 4500, kind: 'cold' });
+}
+
+/**
+ * Pick the heading the game uses. While walking, the direction of travel
+ * from GPS is far more reliable than the phone compass (Android compasses
+ * are often off by tens of degrees, or not north-referenced at all). When
+ * standing still the compass is used, corrected by the error we learned
+ * while the player was walking.
+ */
+function updateHeading(now = Date.now()) {
+  if (state.course && now - state.course.at <= CONFIG.courseMaxAgeMs) {
+    state.playerHeading = state.course.deg;
+    state.headingSource = 'course';
+  } else if (state.compassHeading != null) {
+    const corrected = state.compassOffsetN >= 3 && state.compassOffset != null;
+    state.playerHeading = corrected
+      ? (state.compassHeading + state.compassOffset + 360) % 360
+      : state.compassHeading;
+    state.headingSource = corrected ? 'compass-corrected' : 'compass';
+  } else {
+    state.playerHeading = state.course ? state.course.deg : null;
+    state.headingSource = state.course ? 'course-stale' : 'none';
+  }
+}
+
+/** Measure direction of travel from successive GPS fixes. */
+function updateCourse(pos, now = Date.now()) {
+  const okFix = !(pos.accuracy > CONFIG.courseMaxAccuracyM);
+  let course = null;
+  // The GPS chip's own course, when it reports one at walking pace.
+  if (okFix && pos.course != null && pos.speed != null && pos.speed >= CONFIG.courseMinSpeedMps) course = pos.course;
+  const anchor = state.courseAnchor;
+  if (!anchor) {
+    if (okFix) state.courseAnchor = { lat: pos.lat, lng: pos.lng, t: now };
+  } else if (okFix) {
+    const d = distanceM(anchor, pos);
+    if (d >= CONFIG.courseMinMoveM) {
+      const speed = d / Math.max(0.5, (now - anchor.t) / 1000);
+      if (course == null && speed >= CONFIG.courseMinSpeedMps) course = bearingDeg(anchor, pos);
+      state.courseAnchor = { lat: pos.lat, lng: pos.lng, t: now };
+    } else if (now - anchor.t > 20000) {
+      // Standing still: restart the anchor so slow GPS drift never adds up
+      // to a fake "walk".
+      state.courseAnchor = { lat: pos.lat, lng: pos.lng, t: now };
+    }
+  }
+  if (course == null) return;
+  state.course = { deg: course, at: now };
+  // Learn how far off the compass is (walking direction ≈ facing direction).
+  if (state.compassHeading != null) {
+    const err = angleDiff(state.compassHeading, course);
+    state.compassOffset = state.compassOffset == null
+      ? err
+      : state.compassOffset + 0.2 * angleDiff(state.compassOffset, err);
+    state.compassOffsetN += 1;
+  }
+  updateHeading(now);
 }
 
 /* ------------------------------------------------------------------ */
@@ -408,7 +579,7 @@ function handleEvolve(speciesId) {
 
 function attemptCapture() {
   const sig = currentSignal();
-  if (!sig || sig._hidden || sig._distanceM > CONFIG.captureRangeM) return;
+  if (!sig || !sig._canCapture) return;
 
   const species = speciesById(sig.speciesId);
   const walked = state.huntStartPos ? distanceM(state.huntStartPos, state.playerPos) : 0;
@@ -428,9 +599,9 @@ function attemptCapture() {
   state.signalTarget = rollSignalTarget();
   topUpSignals();
   const next = nearestSignal();
-  state.currentSignalId = next ? next.id : null;
-  state.huntStartPos = state.playerPos;
-  if (next) analytics.signalTracked(next.id, 'auto');
+  if (next) trackSignal(next.id, 'auto');
+  else state.currentSignalId = null;
+  state.captureReadyId = null;
 
   if (species.rarity === 'legendary' && navigator.vibrate) navigator.vibrate([100, 50, 100, 50, 100, 50, 400]);
   ui.showCaptureSuccessBanner(species, isFirst);
@@ -514,6 +685,7 @@ function onPositionUpdate(pos) {
       analytics.moved(delta);
     }
   }
+  updateCourse(pos);
   state.playerPos = pos;
   if (firstFix) {
     state.night = isNight(pos);
@@ -542,7 +714,8 @@ async function startHunting() {
   await requestOrientationPermission();
 
   stopWatchingHeading = watchHeading((heading) => {
-    state.playerHeading = heading;
+    state.compassHeading = heading;
+    updateHeading();
   });
   stopWatchingPosition = watchPosition(onPositionUpdate, onPositionError);
 
@@ -574,6 +747,9 @@ function wireEvents() {
   });
 
   document.getElementById('btn-capture').addEventListener('click', attemptCapture);
+  document.getElementById('capture-ready-bar').addEventListener('click', () => {
+    if (state.currentSignalId) goToScreen('capture');
+  });
   document.getElementById('legendary-dismiss').addEventListener('click', ui.hideLegendaryEvent);
   document.getElementById('cs-view-btn').addEventListener('click', () => {
     ui.hideCaptureSuccessBanner();

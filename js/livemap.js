@@ -18,8 +18,10 @@ let rotatorEl = null;
 let playerMarker = null;
 let accuracyCircle = null;
 let rangeRing = null;
+let trackLine = null; // dashed "this way" line from you to the tracked signal
 const signalLayers = new Map(); // sig.id -> { zone, core, dot, beacon? }
 const hiddenState = new Map();  // sig.id -> bool (last rendered hidden state)
+const currentState = new Map(); // sig.id -> bool (last rendered 'tracked' state)
 let following = true; // auto-pan to the player until they drag the map
 let lastSize = '';
 
@@ -51,6 +53,11 @@ function ensureMap() {
   accuracyCircle = L.circle([0, 0], {
     radius: 10, color: '#00E5FF', weight: 0.8, opacity: 0.5,
     fillColor: '#00E5FF', fillOpacity: 0.08, interactive: false,
+  }).addTo(map);
+
+  trackLine = L.polyline([[0, 0], [0, 0]], {
+    color: '#00FF87', weight: 2.5, opacity: 0, dashArray: '2 8', lineCap: 'round',
+    interactive: false, className: 'track-line',
   }).addTo(map);
 
   playerMarker = L.marker([0, 0], {
@@ -93,8 +100,9 @@ export function recenterLiveMap(playerPos) {
  * @param {number} heading   compass heading 0-360
  * @param {boolean} northUp  false = rotate the map so heading points up
  * @param {(rarity:string)=>string} colorFor
+ * @param {string|null} currentId  the tracked signal (gets a "this way" line)
  */
-export function renderLiveMap(signals, playerPos, heading, northUp, colorFor) {
+export function renderLiveMap(signals, playerPos, heading, northUp, colorFor, currentId = null) {
   const m = ensureMap();
   const offline = document.getElementById('map-offline-note');
   if (!m) {
@@ -175,11 +183,28 @@ export function renderLiveMap(signals, playerPos, heading, northUp, colorFor) {
       if (layers.beacon) layers.beacon.setStyle({ opacity: hidden ? 0 : 0.9 });
     }
   }
+  // Playtest 2026-10-15: players spent 60% of their time on the map, but it
+  // didn't say which signal they were tracking. Draw a line to it.
+  const cur = signals.find((s) => s.id === currentId && !s._hidden);
+  if (cur) {
+    trackLine.setLatLngs([ll, [cur.pos.lat, cur.pos.lng]]);
+    trackLine.setStyle({ opacity: 0.85, color: colorFor(cur._rarity) });
+  } else {
+    trackLine.setStyle({ opacity: 0 });
+  }
+  for (const [id, layers] of signalLayers) {
+    const isCur = id === currentId;
+    if (currentState.get(id) !== isCur) {
+      currentState.set(id, isCur);
+      layers.zone.setStyle({ weight: isCur ? 2.5 : 1.2, dashArray: isCur ? null : '3 4' });
+    }
+  }
   for (const [id, layers] of signalLayers) {
     if (!seen.has(id)) {
       Object.values(layers).forEach((l) => l.remove());
       signalLayers.delete(id);
       hiddenState.delete(id);
+      currentState.delete(id);
     }
   }
 }

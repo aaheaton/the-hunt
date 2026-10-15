@@ -4,7 +4,7 @@
 import { CONFIG } from './config.js';
 import { RARITY, SPECIES, speciesById, formFor, maxStage } from './characters.js';
 import { renderLiveMap } from './livemap.js';
-import { isSearching, temperatureFor } from './search.js';
+import { isSearching, temperatureFor, searchHeat, roughDirection } from './search.js';
 import { getCollection, getJournal, hunterLevel, totalDiscoveredSpeciesCount, evolutionStatus } from './storage.js';
 
 const screens = {
@@ -174,7 +174,7 @@ function hideMetres(sig) {
 /** Distance text for lists/cards: temperature while searching, else metres. */
 function distText(sig) {
   if (sig._hidden) return '??m';
-  if (hideMetres(sig)) return temperatureFor(sig._distanceM).short;
+  if (hideMetres(sig)) return temperatureFor(sig._distanceM, sig._captureRangeM).short;
   return `${Math.round(sig._distanceM)}m`;
 }
 
@@ -226,9 +226,16 @@ export function renderScannerScreen(signals, currentId, heading) {
     freqEl.textContent = '| FREQ: —';
   }
 
-  const ratio = current && !current._hidden ? signalStrengthRatio(current._distanceM) : 0;
+  // In the search area the 0–350m signal gain is pinned near 100% and tells
+  // you nothing, so the meter becomes "search heat": edge of zone → capture.
+  const searchingNow = isSearching(current);
+  const ratio = !current || current._hidden ? 0
+    : searchingNow ? searchHeat(current._distanceM, current._captureRangeM)
+    : signalStrengthRatio(current._distanceM);
   const segs = Math.round(ratio * 8);
-  document.getElementById('gain-label').textContent = `SIGNAL GAIN [${Math.round(ratio * 100)}%]`;
+  document.getElementById('gain-label').textContent = searchingNow
+    ? `SEARCH HEAT [${Math.round(ratio * 100)}%]`
+    : `SIGNAL GAIN [${Math.round(ratio * 100)}%]`;
   document.getElementById('gain-segs').textContent = `${segs} / 8 SEGMENTS`;
   document.getElementById('gain-meter').innerHTML = Array.from({ length: 8 })
     .map((_, i) => `<div class="seg${i < segs ? ' on' : ''}"></div>`)
@@ -260,14 +267,18 @@ export function renderScannerScreen(signals, currentId, heading) {
   const live = current && !current._hidden;
   const searching = isSearching(current);
   const hide = hideMetres(current);
-  const temp = searching ? temperatureFor(current._distanceM) : null;
+  const temp = searching ? temperatureFor(current._distanceM, current._captureRangeM) : null;
   const trend = searching ? current.search.trend : null;
+  // Rough 8-point direction while still a fair way into the search area, so
+  // nobody gets lost; pure hot/cold for the last few metres.
+  const hint = hide && current._distanceM > CONFIG.searchHintAboveM ? roughDirection(current._bearingDeg) : null;
   const scannerEl = document.getElementById('screen-scanner');
   scannerEl.classList.toggle('searching', searching);
   scannerEl.dataset.temp = temp ? (trend === 'colder' ? 'cold' : temp.id) : '';
   document.getElementById('radar-bearing').textContent = !live
     ? 'BEARING: —'
-    : hide ? 'BEARING: SCATTERED — SEARCH ON FOOT' : `BEARING: ${Math.round(current._bearingDeg)}°`;
+    : hide ? (hint ? `BEARING: ROUGHLY ${hint} — SEARCH ON FOOT` : 'BEARING: SCATTERED — SEARCH ON FOOT')
+    : `BEARING: ${Math.round(current._bearingDeg)}°`;
   document.getElementById('radar-distance').textContent = !live ? '—' : hide ? temp.short : `${Math.round(current._distanceM)}`;
   document.getElementById('radar-dist-unit').textContent = hide ? '' : 'METRES';
   document.getElementById('radar-radius').innerHTML = current
@@ -278,6 +289,9 @@ export function renderScannerScreen(signals, currentId, heading) {
   if (!current) {
     statusEl.textContent = 'AWAITING GPS LOCK';
     statusEl.classList.remove('very-close');
+  } else if (current._canCapture) {
+    statusEl.textContent = '◉ IN CAPTURE RANGE — CAPTURE NOW';
+    statusEl.classList.add('very-close');
   } else if (searching) {
     statusEl.textContent =
       trend === 'colder' ? `❄ COLDER ▼ — ${temp.label}` :
@@ -326,8 +340,8 @@ export function renderScannerScreen(signals, currentId, heading) {
   const gotoLabel = document.getElementById('goto-capture-label');
   gotoBtn.disabled = !current;
   if (current) {
-    const inCaptureRange = !current._hidden && current._distanceM <= CONFIG.captureRangeM;
-    gotoLabel.textContent = current._hidden ? 'Signal lost — wait for it to reappear' : inCaptureRange ? 'Enter Capture Mode' : 'Get closer, then enter Capture Mode';
+    gotoLabel.textContent = current._hidden ? 'Signal lost — wait for it to reappear' : current._canCapture ? 'In range — Capture now' : 'Get closer, then enter Capture Mode';
+    gotoBtn.classList.toggle('ready-pulse', !!current._canCapture);
   } else {
     gotoLabel.textContent = 'No signal selected';
   }
@@ -398,7 +412,7 @@ export function renderMapFilters() {
     .join('');
 }
 
-export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetimeDistanceM) {
+export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetimeDistanceM, currentId = null) {
   const visible = signals.filter((s) => mapFilter === 'all' || speciesById(s.speciesId).rarity === mapFilter);
 
   // Real street map with the player's live GPS position (see livemap.js).
@@ -407,7 +421,8 @@ export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetim
     playerPos,
     heading,
     mapNorthUp,
-    getComputedColorForRarity
+    getComputedColorForRarity,
+    currentId
   );
 
   document.getElementById('map-signal-count').textContent = String(visible.length);
@@ -500,7 +515,7 @@ export function renderCaptureScreen(sig, usingFallback) {
   const rarityBadge = document.getElementById('ar-meta-rarity');
   rarityBadge.className = `badge ${rarityClass(species.rarity)}`;
   rarityBadge.textContent = `${RARITY_SYMBOL[species.rarity]} ${RARITY[species.rarity].label}`;
-  document.getElementById('ar-meta-sub').textContent = `BEHAVIOUR: ${species.behavior.toUpperCase()} // HABITAT: ${species.habitat.toUpperCase()}`;
+  document.getElementById('ar-meta-sub').textContent = `BEHAVIOUR: ${(sig.behavior || species.behavior).toUpperCase()} // HABITAT: ${species.habitat.toUpperCase()}`;
   targetEl.classList.toggle('is-hidden', !!sig._hidden);
 
   if (sig._hidden) {
@@ -511,27 +526,50 @@ export function renderCaptureScreen(sig, usingFallback) {
     return;
   }
 
-  const lockRatio = Math.max(0, Math.min(1, 1 - sig._distanceM / (CONFIG.captureRangeM * 3)));
+  const range = sig._captureRangeM || CONFIG.captureRangeM;
+  const lockRatio = sig._canCapture ? 1 : Math.max(0, Math.min(0.95, 1 - (sig._distanceM - range) / (range * 2)));
   document.getElementById('ar-lock-readout').textContent = usingFallback
     ? `SONAR LOCK: ${Math.round(lockRatio * 100)}%`
     : `LOCK-ON: ${Math.round(lockRatio * 100)}%`;
 
   const searching = isSearching(sig);
   const hide = hideMetres(sig);
-  const temp = searching ? temperatureFor(sig._distanceM) : null;
-  const showBanner = searching || sig._distanceM <= CONFIG.veryCloseM;
-  proximityBanner.classList.toggle('hidden', !showBanner);
-  if (showBanner) {
-    document.getElementById('ar-proximity-text').textContent = hide
-      ? `${sig.search.trend === 'colder' ? '❄ COLDER — ' : ''}${temp.label} — SEARCH AROUND YOU`
-      : `TARGET VERY CLOSE — ${Math.round(sig._distanceM)} METRES`;
-  }
+  const temp = searching ? temperatureFor(sig._distanceM, range) : null;
+  const inRange = !!sig._canCapture;
+  // Playtest 2026-10-15: ~10 minutes were spent on this screen for one
+  // capture, often from 25m+ away. Make "too far" impossible to miss.
+  targetEl.classList.toggle('out-of-range', !inRange);
+  proximityBanner.classList.remove('hidden');
+  proximityBanner.classList.toggle('too-far', !inRange && !searching && sig._distanceM > CONFIG.veryCloseM);
+  document.getElementById('ar-proximity-text').textContent = inRange
+    ? 'IN RANGE — DEPLOY CAPTURE NOW'
+    : hide
+      ? `${sig.search.trend === 'colder' ? '❄ COLDER — ' : ''}${temp.label} — NOT IN RANGE YET, KEEP SEARCHING`
+      : sig._distanceM <= CONFIG.veryCloseM
+        ? `TARGET VERY CLOSE — ${Math.round(sig._distanceM)}m (CAPTURE AT ${range}m)`
+        : `SIGNAL TOO FAINT TO CAPTURE — ${Math.round(sig._distanceM)}m AWAY. FOLLOW THE SCANNER, THEN COME BACK`;
 
-  const inRange = sig._distanceM <= CONFIG.captureRangeM;
   captureBtn.disabled = !inRange;
+  captureBtn.classList.toggle('ready-pulse', inRange);
   captureLabel.textContent = inRange
     ? 'Deploy Capture'
     : hide ? `Search closer (${temp.label.toLowerCase()})` : `Get closer (${Math.round(sig._distanceM)}m away)`;
+}
+
+/**
+ * "CAPTURE NOW" bar shown above the nav on every screen except Capture,
+ * whenever the tracked signal is in capture range.
+ */
+export function renderCaptureReady(sig, screen) {
+  const bar = document.getElementById('capture-ready-bar');
+  if (!bar) return;
+  const show = !!sig && !!sig._canCapture && screen !== 'capture' && screen !== 'safety';
+  bar.classList.toggle('hidden', !show);
+  if (show) {
+    const species = speciesById(sig.speciesId);
+    const name = sig.revealedClues.length ? species.name.toUpperCase() : 'SIGNAL';
+    document.getElementById('capture-ready-text').textContent = `${name} IN CAPTURE RANGE — CAPTURE NOW`;
+  }
 }
 
 export function setArFpsText(fps) {
@@ -776,7 +814,7 @@ export function renderPlaytestStats(sum) {
     `<div class="stat-tile"><div class="st-val">${val}</div><div class="st-label">${label}</div></div>`;
   const sig = sum.signals;
   grid.innerHTML = [
-    tile(sum.sessions, 'Sessions'),
+    tile(sum.fieldOnly ? `${sum.fieldOnly.sessions}/${sum.sessions}` : sum.sessions, 'Field / All Sessions'),
     tile(`${sig.captured}/${sig.detected}`, 'Captured / Detected'),
     tile(sig.trackedToCapturedPct == null ? '—' : `${Math.round(sig.trackedToCapturedPct)}%`, 'Tracked → Caught'),
     tile(fmtDuration(sum.perCapturedHunt.medianActiveTrackS), 'Median Hunt'),

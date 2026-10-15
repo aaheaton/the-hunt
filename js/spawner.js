@@ -15,7 +15,7 @@
 import { CONFIG } from './config.js';
 import { rollSpecies, spawnableSpecies, speciesById } from './characters.js';
 import { destinationPoint, distanceM } from './geo.js';
-import { findSpawnPoint, findPointNear, habitatsNear, terrainStatus } from './terrain.js';
+import { findSpawnPoint, findPointNear, habitatsNear, terrainStatus, isSafeSpot } from './terrain.js';
 
 // Ids must stay unique across reloads, because signals are persisted.
 let nextId = 1;
@@ -39,8 +39,14 @@ function randomPoint(playerPos, minD, maxD, cone = null) {
   return destinationPoint(playerPos, bearing, minD + Math.random() * (maxD - minD));
 }
 
+/** The behaviour a species actually spawns with (paused ones → stationary). */
+export function effectiveBehaviour(behavior) {
+  return (CONFIG.pausedBehaviours || []).includes(behavior) ? 'stationary' : behavior;
+}
+
 function makeSignal(species, pos, habitat, unchecked) {
   const now = Date.now();
+  const behavior = effectiveBehaviour(species.behavior);
   return {
     id: `sig-${idPrefix}-${nextId++}`,
     speciesId: species.id,
@@ -50,15 +56,15 @@ function makeSignal(species, pos, habitat, unchecked) {
     pos: { lat: pos.lat, lng: pos.lng },
     habitat,
     unchecked,
-    behavior: species.behavior,
+    behavior,
     nightOnly: !!species.nightOnly,
     legendary: species.rarity === 'legendary',
     spawnedAt: now,
     expiresAt: species.rarity === 'legendary' ? now + CONFIG.legendaryLifetimeMs : null,
     revealedClues: [],
     // Behaviour state (behaviours.js).
-    fleesLeft: species.behavior === 'runner' ? CONFIG.runnerFlees : 0,
-    hidesLeft: species.behavior === 'hider' ? CONFIG.hiderHides : 0,
+    fleesLeft: behavior === 'runner' ? CONFIG.runnerFlees : 0,
+    hidesLeft: behavior === 'hider' ? CONFIG.hiderHides : 0,
     hiddenUntil: null,
     cooldownUntil: 0,
   };
@@ -301,12 +307,48 @@ export function loadSignals(playerPos, { night = false } = {}) {
         distanceM(playerPos, s.pos) <= CONFIG.despawnDistanceM
     );
     if (!signals.length) return null;
+    // Signals saved before a behaviour was paused come back as stationary.
+    for (const s of signals) {
+      const b = effectiveBehaviour(s.behavior);
+      if (b !== s.behavior) {
+        s.behavior = b;
+        s.fleesLeft = 0;
+        s.hidesLeft = 0;
+        s.hiddenUntil = null;
+      }
+    }
     const currentId = signals.some((s) => s.id === data.currentId) ? data.currentId : null;
     return { signals, currentId };
   } catch (err) {
     console.warn('Failed loading signals', err);
     return null;
   }
+}
+
+/**
+ * Terrain arrived after signals were placed blind (Overpass was slow or
+ * down): move every unchecked signal onto a safe, habitat-appropriate spot
+ * near where it was, or confirm it if it's already safe. Signals the player
+ * is actively searching for (skipId) are left alone so they don't jump.
+ * Returns the number of signals that were moved.
+ */
+export function relocateUncheckedSignals(activeSignals, { skipId = null } = {}) {
+  let moved = 0;
+  for (const sig of activeSignals) {
+    if (!sig.unchecked || sig.id === skipId) continue;
+    if (isSafeSpot(sig.pos)) {
+      sig.unchecked = false;
+      continue;
+    }
+    const p = findPointNear(sig.zoneCenter || sig.pos, 0, 80, { habitat: sig.habitat });
+    if (!p) continue; // nowhere safe close by — keep it, still flagged unchecked
+    sig.pos = { lat: p.lat, lng: p.lng };
+    sig.zoneCenter = { lat: p.lat, lng: p.lng };
+    sig.unchecked = false;
+    if (sig.search) { sig.search.inZone = false; sig.search.ema = null; sig.search.ref = null; sig.search.trend = null; }
+    moved += 1;
+  }
+  return moved;
 }
 
 export { terrainStatus };

@@ -1,7 +1,9 @@
 // Minimal app-shell service worker: makes the prototype installable and
 // gives it basic offline resilience. Not doing anything clever with
 // runtime caching yet — that's a later-stage concern.
-const CACHE_NAME = 'the-hunt-v13';
+const CACHE_NAME = 'the-hunt-v14';
+// On-device OpenStreetMap terrain cache (terrain.js) — must survive app updates.
+const KEEP_CACHES = ['the-hunt-terrain-v1'];
 const APP_SHELL = [
   './',
   './index.html',
@@ -80,7 +82,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+      Promise.all(keys.filter((k) => k !== CACHE_NAME && !KEEP_CACHES.includes(k)).map((k) => caches.delete(k)))
     )
   );
   self.clients.claim();

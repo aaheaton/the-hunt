@@ -25,10 +25,16 @@
 import { CONFIG } from './config.js';
 import { angleDiff, bearingDeg } from './geo.js';
 
+// Public Overpass mirrors. They're raced in parallel and the first good
+// answer wins (playtest 2026-10-15: trying them one after another with a 25s
+// timeout each meant the second mirror never got a chance before spawning).
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ];
+const TERRAIN_CACHE = 'the-hunt-terrain-v1';
+const MAX_CACHED_AREAS = 12;
 
 /* ------------------------------------------------------------------ */
 /* Tag classification                                                   */
@@ -334,31 +340,104 @@ out geom qt;`;
 
 async function fetchOverpass(pos) {
   const body = 'data=' + encodeURIComponent(overpassQuery(pos, CONFIG.terrainRadiusM));
-  let lastErr;
-  for (const url of OVERPASS_ENDPOINTS) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), CONFIG.terrainTimeoutMs);
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-        signal: ctrl.signal,
-      });
-      if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      lastErr = err;
-    } finally {
-      clearTimeout(timer);
+  const ctrls = OVERPASS_ENDPOINTS.map(() => new AbortController());
+  const timer = setTimeout(() => ctrls.forEach((c) => c.abort()), CONFIG.terrainTimeoutMs);
+  const attempt = async (url, i) => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+      signal: ctrls[i].signal,
+    });
+    if (!res.ok) throw new Error(`Overpass HTTP ${res.status} (${url})`);
+    const json = await res.json();
+    // An overloaded server can answer 200 with a "remark" and no data.
+    if (!json || !Array.isArray(json.elements) || (!json.elements.length && json.remark)) {
+      throw new Error(`Overpass empty/partial answer (${url})`);
     }
+    return { json, i };
+  };
+  try {
+    const { json, i } = await Promise.any(OVERPASS_ENDPOINTS.map(attempt));
+    ctrls.forEach((c, j) => { if (j !== i) c.abort(); });
+    return json;
+  } catch (err) {
+    throw (err && err.errors && err.errors[0]) || err || new Error('Overpass unavailable');
+  } finally {
+    clearTimeout(timer);
   }
-  throw lastErr || new Error('Overpass unavailable');
 }
 
 function distFromCenter(pos, center) {
   const p = makeProjection(center).toXY(pos.lat, pos.lng);
   return Math.hypot(p[0], p[1]);
+}
+
+/* ------------------------------------------------------------------ */
+/* On-device terrain cache (Cache Storage, keyed by the ~100m-rounded   */
+/* fetch centre). Lets a hunt start instantly in an area you've played  */
+/* before, and covers for Overpass being down. Stays on the device.     */
+/* ------------------------------------------------------------------ */
+
+function cacheKey(center) {
+  return `./__terrain__/${center.lat.toFixed(3)},${center.lng.toFixed(3)}.json`;
+}
+
+function readIndex() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(CONFIG.storage.terrainIndex) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) { return []; }
+}
+
+function writeIndex(arr) {
+  try { localStorage.setItem(CONFIG.storage.terrainIndex, JSON.stringify(arr)); } catch (_) { /* full / blocked */ }
+}
+
+async function saveToCache(center, json) {
+  if (!('caches' in window)) return;
+  try {
+    const cache = await caches.open(TERRAIN_CACHE);
+    await cache.put(cacheKey(center), new Response(JSON.stringify(json), { headers: { 'Content-Type': 'application/json' } }));
+    let idx = readIndex().filter((e) => !(e.lat === center.lat && e.lng === center.lng));
+    idx.unshift({ lat: center.lat, lng: center.lng, at: Date.now() });
+    const dropped = idx.slice(MAX_CACHED_AREAS);
+    idx = idx.slice(0, MAX_CACHED_AREAS);
+    writeIndex(idx);
+    for (const e of dropped) cache.delete(cacheKey(e)).catch(() => {});
+  } catch (err) {
+    console.warn('[terrain] cache write failed', err);
+  }
+}
+
+/**
+ * Cached terrain whose fetch area still covers `pos` comfortably and that is
+ * younger than maxAgeMs. Returns { json, center, at } or null.
+ */
+async function loadFromCache(pos, maxAgeMs) {
+  if (!('caches' in window)) return null;
+  const now = Date.now();
+  const candidates = readIndex()
+    .filter((e) => now - e.at <= maxAgeMs && distFromCenter(pos, e) < CONFIG.terrainRefetchM)
+    .sort((a, b) => distFromCenter(pos, a) - distFromCenter(pos, b));
+  if (!candidates.length) return null;
+  try {
+    const cache = await caches.open(TERRAIN_CACHE);
+    for (const e of candidates) {
+      const res = await cache.match(cacheKey(e));
+      if (res) return { json: await res.json(), center: { lat: e.lat, lng: e.lng }, at: e.at };
+    }
+  } catch (err) {
+    console.warn('[terrain] cache read failed', err);
+  }
+  return null;
+}
+
+let source = null; // 'network' | 'cache' | 'stale-cache' — for analytics
+
+/** Where the terrain in use came from ('network', 'cache', 'stale-cache' or null). */
+export function terrainSource() {
+  return source;
 }
 
 /**
@@ -377,20 +456,34 @@ export function ensureTerrain(pos) {
   // Only a ~100m-rounded location is ever sent to the Overpass server
   // (GDD §39 privacy) — the 800m fetch radius easily absorbs the rounding.
   const center = { lat: Math.round(pos.lat * 1000) / 1000, lng: Math.round(pos.lng * 1000) / 1000 };
-  inflight = fetchOverpass(center)
-    .then((json) => {
-      current = buildTerrain(json, center);
-      status = 'ready';
-      console.info('[terrain] loaded', current.counts);
-      return status;
-    })
-    .catch((err) => {
+  const use = (json, c, from) => {
+    current = buildTerrain(json, c);
+    status = 'ready';
+    source = from;
+    console.info(`[terrain] loaded from ${from}`, current.counts);
+    return status;
+  };
+  inflight = (async () => {
+    // 1. Recently cached terrain for this area: use it, skip the network.
+    const fresh = await loadFromCache(pos, CONFIG.terrainCacheFreshHours * 3600 * 1000);
+    if (fresh) return use(fresh.json, fresh.center, 'cache');
+    // 2. Network (mirrors raced in parallel), cached on success.
+    try {
+      const json = await fetchOverpass(center);
+      saveToCache(center, json);
+      return use(json, center, 'network');
+    } catch (err) {
       console.warn('[terrain] failed to load OSM data', err);
       lastFailAt = Date.now();
-      if (!current) status = 'failed';
+      // 3. Older cached terrain beats no terrain (paths rarely change).
+      if (!current) {
+        const stale = await loadFromCache(pos, CONFIG.terrainCacheMaxDays * 86400 * 1000);
+        if (stale) return use(stale.json, stale.center, 'stale-cache');
+        status = 'failed';
+      }
       return status;
-    })
-    .finally(() => { inflight = null; });
+    }
+  })().finally(() => { inflight = null; });
   return inflight;
 }
 

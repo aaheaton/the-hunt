@@ -893,3 +893,34 @@ body.is-night #hdr-status::after { content: ' • ☾ NIGHT'; color: #C9A7FF; }
 #screen-scanner.searching .radar-dial svg.sweep { opacity: 0.35; }
 .event-toast.kind-search { border-color: #FF9F1C; color: #FFE2B8; box-shadow: 0 0 0 1px rgba(255,159,28,0.35), 0 0 22px rgba(255,159,28,0.25); }
 .event-toast.kind-cold { border-color: #00E5FF; color: #C8F7FF; box-shadow: 0 0 0 1px rgba(0,229,255,0.3), 0 8px 24px rgba(0,0,0,0.5); }
+
+/* ------------------------------------------------------------------ */
+/* Playtest 2026-10-15 fixes: capture-ready bar, out-of-range capture   */
+/* ------------------------------------------------------------------ */
+.capture-ready-bar {
+  position: fixed; left: 12px; right: 12px; z-index: 60;
+  bottom: calc(80px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  min-height: 52px; padding: 12px 16px; border: none; border-radius: var(--r-lg);
+  background: var(--primary-container); color: var(--on-primary-fixed, #00210d);
+  font-family: var(--font-display); font-size: 13px; font-weight: 700; letter-spacing: 0.06em;
+  box-shadow: 0 0 0 2px rgba(0,255,135,0.35), 0 0 28px rgba(0,255,135,0.55), 0 8px 24px rgba(0,0,0,0.5);
+  cursor: pointer; animation: crb-pulse 1.1s ease-in-out infinite;
+}
+.capture-ready-bar.hidden { display: none; }
+.capture-ready-bar .crb-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.capture-ready-bar .crb-go { font-size: 20px; line-height: 1; }
+.capture-ready-bar:active { transform: scale(0.98); }
+@keyframes crb-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(0,255,135,0.35), 0 0 18px rgba(0,255,135,0.4), 0 8px 24px rgba(0,0,0,0.5); }
+  50% { box-shadow: 0 0 0 4px rgba(0,255,135,0.55), 0 0 36px rgba(0,255,135,0.75), 0 8px 24px rgba(0,0,0,0.5); }
+}
+@media (min-width: 520px) {
+  .capture-ready-bar { max-width: 456px; margin: 0 auto; }
+}
+.btn.ready-pulse:not(:disabled) { animation: crb-pulse 1.1s ease-in-out infinite; }
+#ar-target.out-of-range { opacity: 0.45; filter: grayscale(0.6); transition: opacity 0.4s, filter 0.4s; }
+.ar-proximity-banner.too-far { border-color: var(--secondary-fixed-dim); }
+.ar-proximity-banner.too-far .danger-dot::before,
+.ar-proximity-banner.too-far .danger-dot::after { background: var(--secondary-fixed-dim); }
+.ar-proximity-banner.too-far .txt { color: #C8F7FF; }

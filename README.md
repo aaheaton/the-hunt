@@ -264,3 +264,67 @@ Changes from the first outdoor playtest (0 captures in 24 min):
   `signalsLeftBehind`.
 
 All tunables are in `js/config.js`. Service-worker cache v11.
+
+## Playtest fixes (updated 2026-10-15)
+
+Driven by the 2026-10-15 playtest export (43 sessions, ~116 active minutes,
+257 signals detected, 63 tracked, **1 captured**). Hunts were failing in the
+last 30 metres and on direction, not on detection.
+
+**Capture**
+- Capture range now adapts to GPS accuracy: `clamp(accuracy, 12m, 20m)`
+  (`captureRangeM`, `captureRangeMaxM`, `captureAccuracyFactor`). A ±15m fix
+  could never resolve a fixed 12m circle.
+- Once in range, a signal stays capturable for 8s (`captureLatchMs`) so a GPS
+  wobble can't disable the button just as you tap it.
+- Entering capture range buzzes, toasts, and shows a pulsing
+  **"… IN CAPTURE RANGE — CAPTURE NOW"** bar on every screen (players spent
+  60% of their time on the Map, which had no capture prompt at all).
+- The Capture screen now says plainly when you're too far ("SIGNAL TOO FAINT
+  TO CAPTURE — 70m AWAY…") and dims the target.
+
+**Search stage (hot/cold)**
+- "Colder" now needs the smoothed distance to grow 6m on 2 ticks in a row
+  (`searchColderStepM`, `searchColderConfirmTicks`), and never fires while you
+  can capture. Most of the 14 colder warnings in the log were GPS noise.
+- The gain meter becomes **SEARCH HEAT** inside the search area, and beyond
+  15m the scanner gives a rough 8-point direction ("ROUGHLY NE")
+  (`searchHintAboveM`). The last 15m stays pure hot/cold.
+
+**Direction**
+- While walking, heading comes from the GPS track (direction of travel)
+  instead of the compass; standing still uses the compass, corrected by the
+  error learned while walking (`course*` settings).
+- "You're moving away from the signal — it's behind you" nudge when the
+  smoothed distance grows 25m past your closest approach (`awayNudgeM`).
+  If the game picked the signal for you, it switches to a clearly closer one
+  instead (`autoRetargetGainM`).
+- The Map draws a dashed line from you to the tracked signal and highlights
+  its zone.
+
+**Spawning**
+- Signals spawn 40–250m away (was 450m), at most 4 at once (was 7), with 2
+  always within 100m. Scanner range / despawn distance are now 350m.
+- Runner and Hider behaviours are paused (`pausedBehaviours`) — those
+  species spawn stationary until the basic hunt converts. Set it to `[]` to
+  bring them back.
+- Terrain: Overpass mirrors are raced in parallel with a 12s timeout, the
+  result is cached on the device (Cache Storage, kept across app updates) and
+  reused for 72h, older cache is a fallback when Overpass is down, retries
+  every 20s, and when terrain arrives late any blind-placed signals are moved
+  onto safe paths/parks.
+
+**Analytics** (export schema unchanged, new fields are additive)
+- Export lists only non-empty sessions (`emptySessionsOmitted`), so the list
+  matches `summary.sessions`; the live session is exported tidied
+  (`endReason: "exported-live"`, open hunts `outcome: "in-progress"`, rounded).
+- Each session is tagged `kind: field | desk` (field = ≥60s active and ≥25m
+  walked) and `summary.fieldOnly` repeats the core metrics for field sessions.
+- New: GPS accuracy histogram + per-hunt median accuracy and accuracy/capture
+  range at closest approach; heading-source minutes; capture-ready alerts;
+  capture-screen opens (and how many were out of range); away nudges and
+  auto-retargets; terrain source (network / cache / stale-cache) and
+  `ready-late`.
+
+The metric to watch next: **tracked → captured for common creatures** (2% in
+this playtest). Target: above 50%.

@@ -32,6 +32,11 @@ export function watchPosition(onUpdate, onError) {
         lat: pos.coords.latitude,
         lng: pos.coords.longitude,
         accuracy: pos.coords.accuracy,
+        // Direction of travel / speed from the GPS chip, when the device
+        // reports them (null when stationary or unsupported).
+        course: Number.isFinite(pos.coords.heading) ? pos.coords.heading : null,
+        speed: Number.isFinite(pos.coords.speed) ? pos.coords.speed : null,
+        at: pos.timestamp || Date.now(),
       });
     },
     (err) => onError?.(err),
@@ -58,7 +63,11 @@ export function watchHeading(onUpdate) {
       // Best-effort fallback; not guaranteed north-referenced on all devices.
       heading = (360 - evt.alpha) % 360;
     }
-    if (heading !== null && !Number.isNaN(heading)) onUpdate(heading);
+    if (heading !== null && !Number.isNaN(heading)) {
+      // Tell the caller whether this reading is known to be north-referenced.
+      const absolute = typeof evt.webkitCompassHeading === 'number' || !!evt.absolute;
+      onUpdate(heading, { absolute });
+    }
   };
 
   const eventName =

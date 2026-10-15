@@ -6,7 +6,9 @@ export const CONFIG = {
   // How far out a new signal can spawn from the player when a hunt starts.
   // Measured to the creature's true position.
   spawnMinDistanceM: 40,
-  spawnMaxDistanceM: 450,
+  // Playtest 2026-10-15: median signal was 211m away when detected and the
+  // only capture started at 28m — spawn closer so hunts fit a short session.
+  spawnMaxDistanceM: 250,
 
   // The first signal of every session is placed close, so the very first
   // hunt fits in a couple of minutes (playtest 2026-10-06: nearest signal
@@ -29,10 +31,10 @@ export const CONFIG = {
 
   // Keep the field populated as the player walks (playtest: signals were
   // left behind and the area emptied out).
-  despawnDistanceM: 500,         // signals further than this are removed
-  nearRadiusM: 150,              // always keep some signals within this…
-  nearMinSignals: 1,             // …at least this many…
-  nearMaxSignals: 2,             // …topping up to a random 1–2 when short
+  despawnDistanceM: 350,         // signals further than this are removed
+  nearRadiusM: 100,              // always keep some signals within this…
+  nearMinSignals: 2,             // …at least this many (playtest 2026-10-15: guarantee 2 within 100m)…
+  nearMaxSignals: 2,             // …topping up to 2 when short
   topUpRetryMs: 20 * 1000,       // wait this long after a failed top-up
 
   // Signals survive short app restarts / reloads for this long.
@@ -46,7 +48,8 @@ export const CONFIG = {
   // Scanner Level 1 range (see GDD section 24) — signals outside this
   // radius aren't detected at all yet. Also doubles as the Map screen's
   // radar view radius, so the map and scanner always agree on "in range".
-  scannerRangeM: 500,
+  // Matches the closer spawn ring (was 500m, when signals spawned out to 450m).
+  scannerRangeM: 350,
 
   // --- The final approach: "Search" stage (GDD §3) ---
   // Entering the search area (within searchZoneRadiusM of the creature)
@@ -57,18 +60,57 @@ export const CONFIG = {
   searchPulseMaxMs: 1600,        // pulse interval at the zone edge (35m)…
   searchPulseMinMs: 250,         // …down to this at capture range
   searchWarmerStepM: 3,          // smoothed distance must drop this much for "warmer"
-  searchColderStepM: 4,          // …or rise this much for a "colder" warning
+  // Playtest 2026-10-15: 14 "colder" warnings, mostly GPS noise (a phone's
+  // reported position wanders 5–20m standing still). Now the smoothed
+  // distance must grow by 6m on 2 ticks in a row before we say "colder".
+  searchColderStepM: 6,          // …or rise this much for a "colder" warning
+  searchColderConfirmTicks: 2,   // …on this many consecutive ticks
   searchColderToastMs: 6000,     // min gap between "colder" toasts
+  // Inside the search area exact metres/bearing stay hidden, but beyond this
+  // distance the scanner still gives a rough 8-point direction ("TRY NE") so
+  // players don't get lost. Closer than this it's pure hot/cold.
+  searchHintAboveM: 15,
 
   // Distance thresholds that change what the scanner shows.
   veryCloseM: 20,
+  // Capture range adapts to GPS accuracy (playtest: 12m vs ±5–20m GPS meant
+  // players stood "on" a creature and still couldn't capture it). Effective
+  // range = clamp(accuracy × factor, captureRangeM, captureRangeMaxM).
   captureRangeM: 12,
+  captureRangeMaxM: 20,
+  captureAccuracyFactor: 1.0,
+  // Once in range, stay capturable for this long even if GPS jitters out.
+  captureLatchMs: 8000,
 
   // How many simultaneous signals the player can have active at once.
   // The actual target is re-rolled between min and max each time the
   // list is refilled (e.g. after a capture), so the map feels less uniform.
+  // Playtest 2026-10-15: 6–12 signals per session, 75% never tracked, 25
+  // target switches — fewer choices, more focus.
   minActiveSignals: 3,
-  maxActiveSignals: 7,
+  maxActiveSignals: 4,
+
+  // --- Direction (playtest 2026-10-15: half of longer hunts ended further
+  // away than they started) ---
+  // While walking, heading comes from the GPS track (direction of travel)
+  // instead of the phone compass, which is unreliable on many Androids.
+  courseMinMoveM: 6,             // need this much movement for a course reading…
+  courseMinSpeedMps: 0.6,        // …at walking pace (filters GPS drift)…
+  courseMaxAccuracyM: 25,        // …with a usable fix
+  courseMaxAgeMs: 8000,          // course reading stays "fresh" this long
+  // "You're moving away" nudge: smoothed distance grew this much past the
+  // closest you've been to the tracked signal.
+  awayNudgeM: 25,
+  awayNudgeCooldownMs: 45 * 1000,
+  // If the game picked the signal for you (not you) and you're walking away
+  // from it, switch to a nearer one when it's at least this much closer.
+  autoRetargetGainM: 20,
+
+  // Behaviours paused for now (playtest 2026-10-15: 0% capture rate, and even
+  // stationary creatures were only caught 2% of the time). Species with these
+  // behaviours spawn as stationary until the core hunt works. Set to [] to
+  // bring them back.
+  pausedBehaviours: ['runner', 'hider'],
 
   // How often (ms) "Wanderer" characters take a small random step.
   wanderTickMs: 8000,
@@ -91,9 +133,16 @@ export const CONFIG = {
   terrainRadiusM: 800,
   // Re-fetch once the player is this far from the last fetch centre.
   terrainRefetchM: 300,
-  terrainTimeoutMs: 25000,
+  // Playtest 2026-10-15: terrain failed in 24 of 43 sessions. Mirrors are now
+  // raced in parallel (fastest wins) with a shorter timeout, the last good
+  // result is cached on the device, and failed loads retry sooner.
+  terrainTimeoutMs: 12000,
   // After a failed fetch, wait this long before trying again.
-  terrainRetryMs: 60 * 1000,
+  terrainRetryMs: 20 * 1000,
+  // Re-use cached terrain for the same area without asking the network
+  // when younger than this; older (up to terrainCacheMaxDays) is a fallback.
+  terrainCacheFreshHours: 72,
+  terrainCacheMaxDays: 30,
   // How close (m) to a public footpath counts as "on the path".
   terrainPathSnapM: 4,
   // "Near water" band: a creature sits on the bank within this many metres.
@@ -144,5 +193,6 @@ export const CONFIG = {
     hunterState: 'thehunt_hunter_state_v1',
     safetySeen: 'thehunt_safety_seen_v1',
     lifetimeDistanceM: 'thehunt_lifetime_distance_v1',
+    terrainIndex: 'thehunt_terrain_index_v1',
   },
 };
