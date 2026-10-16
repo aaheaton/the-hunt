@@ -49,7 +49,7 @@ export function markSafetyIntroSeen() {
  * Only ever stores an approximate (fuzzed) location, never a precise route
  * (GDD section 39 — privacy should be designed in, not bolted on).
  */
-export function recordCapture({ speciesId, rarity, location, distanceWalkedM }) {
+export function recordCapture({ speciesId, rarity, location, distanceWalkedM, habitat = null }) {
   const collection = getCollection();
   const isFirst = !collection[speciesId];
   const entry = collection[speciesId] || { count: 0, firstDiscoveredAt: null };
@@ -66,10 +66,59 @@ export function recordCapture({ speciesId, rarity, location, distanceWalkedM }) 
     approxLocation: fuzzCoord(location),
     distanceWalkedM: Math.round(distanceWalkedM || 0),
     firstDiscovery: isFirst,
+    habitat,
   });
   writeJSON(CONFIG.storage.journal, journal);
 
   return { isFirst, entry };
+}
+
+/** Has this species ever been caught? (Drives the "NEW SPECIES" tag.) */
+export function isSpeciesCollected(speciesId) {
+  return !!getCollection()[speciesId];
+}
+
+/* ------------------------------------------------------------------ */
+/* Daily hunt (GDD §21)                                                 */
+/* ------------------------------------------------------------------ */
+
+/** Local calendar day, e.g. "2026-10-16". */
+export function todayKey(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Today's goal — the same all day, picked from CONFIG.dailyGoals by the date. */
+export function dailyGoal(key = todayKey()) {
+  const goals = CONFIG.dailyGoals || [];
+  if (!goals.length) return null;
+  let h = 0;
+  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return goals[h % goals.length];
+}
+
+function matchesGoal(goal, e) {
+  if (goal.rarity && e.rarity !== goal.rarity) return false;
+  if (goal.firstOnly && !e.firstDiscovery) return false;
+  if (goal.habitat && !(e.habitat === goal.habitat || (goal.habitat === 'trees' && e.habitat === 'woods'))) return false;
+  return true;
+}
+
+/** { goal, count, target, done } for today, counted from today's journal entries. */
+export function dailyProgress(now = new Date()) {
+  const key = todayKey(now);
+  const goal = dailyGoal(key);
+  if (!goal) return null;
+  const count = getJournal().filter((e) => todayKey(new Date(e.at)) === key && matchesGoal(goal, e)).length;
+  return { goal, key, count: Math.min(count, goal.target), target: goal.target, done: count >= goal.target };
+}
+
+/** True the first time it's called on the day the daily goal is completed. */
+export function claimDailyCompletion() {
+  const p = dailyProgress();
+  if (!p || !p.done) return false;
+  if (readJSON(CONFIG.storage.dailyDone, null) === p.key) return false;
+  writeJSON(CONFIG.storage.dailyDone, p.key);
+  return true;
 }
 
 export function totalDiscoveredSpeciesCount() {

@@ -13,6 +13,10 @@ import {
   spawnStartupSignals,
   ensureNearSignals,
   despawnFarSignals,
+  despawnBehindSignals,
+  spawnAheadOffer,
+  isAhead,
+  isBehind,
   saveSignals,
   loadSignals,
   relocateUncheckedSignals,
@@ -30,6 +34,8 @@ import {
   addLifetimeDistance,
   getLifetimeDistanceM,
   exportFieldLogBlobUrl,
+  claimDailyCompletion,
+  dailyProgress,
 } from './storage.js';
 import * as ui from './ui.js';
 import * as analytics from './analytics.js';
@@ -48,6 +54,11 @@ const state = {
   trackedBy: null,          // who picked the current signal: 'player' | 'auto' | 'restored'
   captureReadyId: null,     // signal we've already announced "in capture range" for
   lastAwayNudgeAt: 0,
+  lastAheadOfferAt: 0,
+  speedMps: null,           // smoothed walking speed (m/s)
+  lastPosAt: 0,
+  recentFixes: [],          // last few fixes { lat, lng, t } for a jitter-resistant speed
+  captureVia: null,         // how the Capture screen was reached: 'bar' | 'nav' | 'scanner'
   huntStartPos: null,
   sessionDistanceM: 0,
   currentScreen: 'safety',
@@ -93,7 +104,7 @@ function recomputeSignal(sig, now = Date.now()) {
   // Capture range widens with poor GPS accuracy, and once you've been in
   // range it stays capturable for a few seconds so a GPS wobble can't snatch
   // the button away just as you tap it (playtest 2026-10-15).
-  const range = captureRangeFor(state.playerPos.accuracy);
+  const range = captureRangeFor(state.playerPos.accuracy, speciesById(sig.speciesId)?.rarity);
   sig._captureRangeM = range;
   if (!sig._hidden && sig._distanceM <= range) sig._capturableUntil = now + CONFIG.captureLatchMs;
   sig._canCapture = !sig._hidden && (
@@ -113,6 +124,15 @@ function trackSignal(id, by) {
   if (id) analytics.signalTracked(id, by);
 }
 
+/**
+ * The direction of travel while the player is actually walking (heading from
+ * the GPS track), else null. Spawning ahead / "behind you" logic only kicks
+ * in while walking — standing still, every direction is fair game.
+ */
+function walkingHeading() {
+  return state.headingSource === 'course' && state.playerHeading != null ? state.playerHeading : null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Spawning (terrain-aware, night-aware)                               */
 /* ------------------------------------------------------------------ */
@@ -122,8 +142,9 @@ function topUpSignals() {
   if (!state.playerPos || !state.spawnsStarted) return;
   state.night = isNight(state.playerPos);
   if (!state.signalTarget) state.signalTarget = rollSignalTarget();
-  const ctx = { night: state.night, currentId: state.currentSignalId };
-  // 1–2 always within 150m first, then fill the rest of the field.
+  const ctx = { night: state.night, currentId: state.currentSignalId, heading: walkingHeading() };
+  // A couple always nearby (ahead of you, if you're walking) first, then
+  // fill the rest of the field.
   const near = ensureNearSignals(state.activeSignals, state.playerPos, ctx);
   for (const sig of near.removed) analytics.signalGone(sig.id, 'made-room');
   const added = [
@@ -132,7 +153,7 @@ function topUpSignals() {
   ];
   for (const sig of added) analytics.signalDetected(sig, distanceM(state.playerPos, sig.pos));
   if (!state.currentSignalId && state.activeSignals[0]) {
-    trackSignal(nearestSignal()?.id || state.activeSignals[0].id, 'auto');
+    trackSignal(bestSignal()?.id || state.activeSignals[0].id, 'auto');
   }
   const legendary = added.find((s) => s.legendary);
   if (legendary) announceLegendary(legendary);
@@ -142,6 +163,15 @@ function nearestSignal() {
   return [...state.activeSignals]
     .filter((s) => !s._hidden)
     .sort((a, b) => distanceM(state.playerPos, a.pos) - distanceM(state.playerPos, b.pos))[0] || null;
+}
+
+/** Nearest signal ahead of a walking player (any direction when standing), else the nearest. */
+function bestSignal(excludeId = null) {
+  const heading = walkingHeading();
+  const pool = [...state.activeSignals]
+    .filter((s) => !s._hidden && s.id !== excludeId)
+    .sort((a, b) => distanceM(state.playerPos, a.pos) - distanceM(state.playerPos, b.pos));
+  return pool.find((s) => isAhead(state.playerPos, heading, s)) || pool[0] || null;
 }
 
 function announceLegendary(sig) {
@@ -161,6 +191,13 @@ function maintainField() {
 
   const gone = despawnFarSignals(state.activeSignals, state.playerPos);
   for (const sig of gone) analytics.signalGone(sig.id, 'left-behind');
+  // Walking away from a signal that's well behind you? Free its slot for one
+  // ahead (playtest 2026-10-16: 15 of 20 signals ended up behind a walker).
+  const behind = despawnBehindSignals(state.activeSignals, state.playerPos, {
+    heading: walkingHeading(), currentId: state.currentSignalId,
+  });
+  for (const sig of behind) analytics.signalGone(sig.id, 'behind');
+  gone.push(...behind);
   if (gone.some((s) => s.id === state.currentSignalId)) {
     state.currentSignalId = null;
     state.trackedBy = null;
@@ -170,9 +207,10 @@ function maintainField() {
 
   const before = state.activeSignals.length;
   topUpSignals();
+  const heading = walkingHeading();
   const short =
     state.activeSignals.length < state.signalTarget ||
-    !state.activeSignals.some((s) => distanceM(state.playerPos, s.pos) <= CONFIG.nearRadiusM);
+    !state.activeSignals.some((s) => distanceM(state.playerPos, s.pos) <= CONFIG.nearRadiusM && !isBehind(state.playerPos, heading, s));
   // Nothing could be placed (e.g. no safe ground nearby) — back off a while.
   if (short && state.activeSignals.length === before) state.nextFieldCheckAt = now + CONFIG.topUpRetryMs;
 }
@@ -307,7 +345,8 @@ function handleBehaviourEvents(events) {
 /* Screen navigation                                                    */
 /* ------------------------------------------------------------------ */
 
-function goToScreen(name) {
+function goToScreen(name, via = 'nav') {
+  if (name === 'capture' && state.currentScreen !== 'capture') state.captureVia = via;
   state.currentScreen = name;
   analytics.screenChanged(name);
   if (name === 'capture') {
@@ -354,10 +393,12 @@ function refreshCurrentScreen() {
       getLifetimeDistanceM(),
       state.currentSignalId
     );
+    ui.renderDailyGoal(dailyProgress());
   } else if (state.currentScreen === 'capture') {
-    ui.renderCaptureScreen(currentSignal(), state.arFallback);
+    ui.renderCaptureScreen(currentSignal(), state.arFallback, state.playerHeading);
   } else if (state.currentScreen === 'journal') {
     ui.renderJournal(openDossier);
+    ui.renderDailyGoal(dailyProgress());
     ui.renderPlaytestStats(analytics.summary());
   }
   ui.renderCaptureReady(currentSignal(), state.currentScreen);
@@ -378,8 +419,9 @@ function tick() {
   maintainField();
   const now = Date.now();
   for (const sig of state.activeSignals) recomputeSignal(sig, now);
+  decaySpeed(now);
   let cur = currentSignal();
-  if (cur) handleSearchEvents(cur, updateSearch(cur));
+  if (cur) handleSearchEvents(cur, updateSearch(cur, now, { speedMps: state.speedMps }));
   if (cur) handleAwayFromSignal(cur, now);
   cur = currentSignal();
   handleCaptureReady(cur);
@@ -388,6 +430,8 @@ function tick() {
   analytics.tick(state.activeSignals, {
     headingSource: state.headingSource,
     accuracyM: state.playerPos.accuracy,
+    speedMps: state.speedMps,
+    searching: isSearching(cur),
   });
   persistSignals(false);
   refreshCurrentScreen();
@@ -401,8 +445,13 @@ function handleSearchEvents(sig, events) {
   for (const { type } of events) {
     analytics.searchEvent(type, sig.id);
     if (type === 'entered') {
-      if (navigator.vibrate) navigator.vibrate([120, 60, 120, 60, 260]);
-      ui.showToast('◎ IN THE SEARCH AREA — IT\'S CLOSE. FOLLOW THE PULSES: FASTER = WARMER', { ms: 4500, kind: 'search' });
+      // Playtest 2026-10-16: players walked straight through the search area
+      // at full pace. Make the entry unmissable — long buzz + STOP.
+      if (navigator.vibrate) navigator.vibrate([400, 120, 400, 120, 700]);
+      ui.showToast('■ STOP — IT\'S HERE, WITHIN 35m. LOOK AROUND, THEN WALK SLOWLY: FASTER PULSES = WARMER', { ms: 7000, kind: 'search' });
+    } else if (type === 'slow-down') {
+      if (navigator.vibrate) navigator.vibrate([250, 100, 250]);
+      ui.showToast('■ SLOW DOWN — YOU\'RE IN THE SEARCH AREA. STOP, LOOK AROUND, AND MOVE SLOWLY', { ms: 4500, kind: 'search' });
     } else if (type === 'colder') {
       if (navigator.vibrate) navigator.vibrate(320);
       ui.showToast('❄ COLDER — YOU\'RE MOVING AWAY', { ms: 2500, kind: 'cold' });
@@ -473,7 +522,12 @@ function relativeDirection(bearing) {
  * Playtest 2026-10-15: half of the longer hunts ended further from the
  * signal than they started. If the (smoothed) distance grows well past the
  * closest you've been, say so — and if the game chose this signal for you,
- * swap to one that's actually closer instead.
+ * swap to a better one instead.
+ *
+ * Playtest 2026-10-16: 14 nudges, 0 swaps — the walker had left every signal
+ * behind, so none was "closer". Now, while walking, the alternative must be
+ * AHEAD of you; if nothing is, a fresh signal is placed ahead and offered.
+ * Auto-picked hunts switch to it; ones the player picked get a tappable offer.
  */
 function handleAwayFromSignal(sig, now) {
   if (sig._hidden || isSearching(sig) || !isFinite(sig._distanceM)) return;
@@ -485,19 +539,80 @@ function handleAwayFromSignal(sig, now) {
   state.lastAwayNudgeAt = now;
   a.best = a.ema;
 
-  if (state.trackedBy === 'auto') {
-    const alt = nearestSignal();
-    if (alt && alt.id !== sig.id && alt._distanceM <= sig._distanceM - CONFIG.autoRetargetGainM) {
-      trackSignal(alt.id, 'auto-retarget');
-      analytics.directionEvent('retarget', sig.id);
-      if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
-      ui.showToast(`↪ SWITCHED TO A CLOSER SIGNAL — ${Math.round(alt._distanceM)}m ${relativeDirection(alt._bearingDeg)}`, { ms: 4000, kind: 'info' });
-      return;
+  const heading = walkingHeading();
+  const candidates = state.activeSignals
+    .filter((s) => s.id !== sig.id && !s._hidden && isAhead(state.playerPos, heading, s))
+    .sort((x, y) => x._distanceM - y._distanceM);
+  let alt = candidates[0] || null;
+  let offered = false;
+  if (!alt && heading != null) {
+    const offer = spawnAheadOffer(state.activeSignals, state.playerPos, {
+      night: state.night, heading, currentId: sig.id,
+    });
+    for (const r of offer.removed) analytics.signalGone(r.id, 'made-room');
+    if (offer.sig) {
+      recomputeSignal(offer.sig, now);
+      analytics.signalDetected(offer.sig, offer.sig._distanceM);
+      analytics.directionEvent('offer', sig.id);
+      state.lastAheadOfferAt = now;
+      alt = offer.sig;
+      offered = true;
+      persistSignals(true);
     }
+  }
+
+  const currentBehind = isBehind(state.playerPos, heading, sig);
+  const better = alt && (offered || currentBehind || alt._distanceM <= sig._distanceM - CONFIG.autoRetargetGainM);
+  if (better && state.trackedBy === 'auto') {
+    trackSignal(alt.id, 'auto-retarget');
+    analytics.directionEvent('retarget', sig.id);
+    if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
+    ui.showToast(`↪ ${offered ? 'NEW SIGNAL AHEAD' : 'SWITCHED TO A SIGNAL AHEAD'} — ${Math.round(alt._distanceM)}m ${relativeDirection(alt._bearingDeg)}`, { ms: 4500, kind: 'info' });
+    return;
   }
   analytics.directionEvent('away', sig.id);
   if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  if (better) {
+    const altId = alt.id;
+    ui.showToast(`↩ MOVING AWAY FROM YOUR SIGNAL. ${offered ? 'NEW SIGNAL' : 'ANOTHER ONE'} ${Math.round(alt._distanceM)}m ${relativeDirection(alt._bearingDeg)} — TAP TO SWITCH`, {
+      ms: 7000, kind: 'cold', onTap: () => selectSignal(altId),
+    });
+    return;
+  }
   ui.showToast(`↩ YOU'RE MOVING AWAY FROM THE SIGNAL — IT'S ${relativeDirection(sig._bearingDeg)}`, { ms: 4500, kind: 'cold' });
+}
+
+/* ------------------------------------------------------------------ */
+/* Walking speed                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Smoothed walking speed. Uses the GPS chip's own speed when it reports one;
+ * otherwise displacement over the last ~5s of fixes (one-second GPS jitter
+ * would read as a fake jog).
+ */
+function updateSpeed(pos, now = Date.now()) {
+  state.recentFixes.push({ lat: pos.lat, lng: pos.lng, t: now });
+  while (state.recentFixes.length > 2 && now - state.recentFixes[0].t > 6000) state.recentFixes.shift();
+  let inst = null;
+  if (pos.speed != null && isFinite(pos.speed) && !(pos.accuracy > CONFIG.courseMaxAccuracyM)) {
+    inst = pos.speed;
+  } else {
+    const first = state.recentFixes[0];
+    const dt = (now - first.t) / 1000;
+    if (dt >= 2) inst = distanceM(first, pos) / dt;
+  }
+  state.lastPosAt = now;
+  if (inst == null) return;
+  state.speedMps = state.speedMps == null ? inst : state.speedMps + 0.5 * (inst - state.speedMps);
+}
+
+/** No fix for a while usually means standing still (Android only reports changes). */
+function decaySpeed(now) {
+  if (state.speedMps != null && state.lastPosAt && now - state.lastPosAt > 5000) {
+    state.speedMps *= 0.5;
+    if (state.speedMps < 0.05) state.speedMps = 0;
+  }
 }
 
 /**
@@ -583,13 +698,15 @@ function attemptCapture() {
 
   const species = speciesById(sig.speciesId);
   const walked = state.huntStartPos ? distanceM(state.huntStartPos, state.playerPos) : 0;
-  analytics.signalCaptured(sig.id);
+  analytics.signalCaptured(sig.id, state.captureVia);
   const { isFirst } = recordCapture({
     speciesId: species.id,
     rarity: species.rarity,
     location: sig.pos,
     distanceWalkedM: walked,
+    habitat: sig.habitat,
   });
+  const dailyDone = claimDailyCompletion();
 
   state.activeSignals = state.activeSignals.filter((s) => s.id !== sig.id);
   // Auto-advance to the next nearest signal so the loop keeps flowing
@@ -598,7 +715,7 @@ function attemptCapture() {
   state.currentSignalId = null;
   state.signalTarget = rollSignalTarget();
   topUpSignals();
-  const next = nearestSignal();
+  const next = bestSignal();
   if (next) trackSignal(next.id, 'auto');
   else state.currentSignalId = null;
   state.captureReadyId = null;
@@ -608,6 +725,13 @@ function attemptCapture() {
   persistSignals(true);
   refreshCurrentScreen();
   setTimeout(() => ui.hideCaptureSuccessBanner(), 4500);
+  if (dailyDone) {
+    const p = dailyProgress();
+    setTimeout(() => {
+      if (navigator.vibrate) navigator.vibrate([80, 40, 80, 40, 240]);
+      ui.showToast(`✔ DAILY HUNT COMPLETE — ${p.goal.text.toUpperCase()}`, { ms: 5000, kind: 'legendary' });
+    }, 1200);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -686,6 +810,7 @@ function onPositionUpdate(pos) {
     }
   }
   updateCourse(pos);
+  updateSpeed(pos);
   state.playerPos = pos;
   if (firstFix) {
     state.night = isNight(pos);
@@ -739,16 +864,19 @@ function wireEvents() {
   document.getElementById('btn-start').addEventListener('click', startHunting);
 
   document.querySelectorAll('.nav-item').forEach((btn) => {
-    btn.addEventListener('click', () => goToScreen(btn.dataset.screen));
+    btn.addEventListener('click', () => goToScreen(btn.dataset.screen, 'nav'));
   });
 
   document.getElementById('btn-goto-capture').addEventListener('click', () => {
-    if (state.currentSignalId) goToScreen('capture');
+    if (state.currentSignalId) goToScreen('capture', 'scanner');
   });
 
   document.getElementById('btn-capture').addEventListener('click', attemptCapture);
   document.getElementById('capture-ready-bar').addEventListener('click', () => {
-    if (state.currentSignalId) goToScreen('capture');
+    if (!state.currentSignalId) return;
+    // The bar is "CAPTURE NOW" when in range, or "STOP — SEARCH AREA" while searching.
+    if (currentSignal()?._canCapture) goToScreen('capture', 'bar');
+    else goToScreen('scanner', 'bar');
   });
   document.getElementById('legendary-dismiss').addEventListener('click', ui.hideLegendaryEvent);
   document.getElementById('cs-view-btn').addEventListener('click', () => {

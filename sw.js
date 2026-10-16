@@ -1,7 +1,7 @@
 // Minimal app-shell service worker: makes the prototype installable and
 // gives it basic offline resilience. Not doing anything clever with
 // runtime caching yet — that's a later-stage concern.
-const CACHE_NAME = 'the-hunt-v14';
+const CACHE_NAME = 'the-hunt-v15';
 // On-device OpenStreetMap terrain cache (terrain.js) — must survive app updates.
 const KEEP_CACHES = ['the-hunt-terrain-v1'];
 const APP_SHELL = [

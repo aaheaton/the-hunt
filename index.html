@@ -167,6 +167,7 @@
     </div>
   </div>
   <div style="padding:14px 16px 96px;display:flex;flex-direction:column;gap:12px;">
+    <div class="daily-goal hidden" id="daily-goal-map"></div>
     <div class="filter-row" id="map-filters"></div>
     <div>
       <div class="label-caps muted" style="margin-bottom:8px;">SESSION TELEMETRY</div>
@@ -230,6 +231,16 @@
       </div>
     </div>
 
+    <!-- Out of range: scan view (direction + distance, or search heat) -->
+    <div class="ar-scan-panel hidden" id="ar-scan-panel">
+      <div class="scan-arrow" id="scan-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3l7 16-7-4-7 4 7-16Z" fill="currentColor" fill-opacity="0.25" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+      <div class="scan-text">
+        <div class="scan-main" id="scan-main">—</div>
+        <div class="scan-dir" id="scan-dir">—</div>
+        <div class="scan-heat-row"><span class="label-caps" id="scan-heat-label">SIGNAL</span><div class="seg-meter scan-heat" id="scan-heat"></div></div>
+      </div>
+    </div>
+
     <div class="ar-lower-row">
       <div class="ar-meta-card hidden" id="ar-meta-card">
         <div class="name-row"><span class="name" id="ar-meta-name">—</span><span class="badge" id="ar-meta-rarity"></span></div>
@@ -285,6 +296,8 @@
     <div class="seg-meter" id="journal-progress-meter" style="margin-top:6px;"></div>
     <div class="rarity-chip-row" id="rarity-breakdown"></div>
   </div>
+
+  <div class="daily-goal hidden" id="daily-goal-journal"></div>
 
   <div id="featured-card-wrap"></div>
 

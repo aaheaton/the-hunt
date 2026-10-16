@@ -12,6 +12,12 @@
 // from (direction of travel vs. compass), capture-screen use, "capture now"
 // alerts, "moving away" nudges, and a desk-test vs. field-session split.
 //
+// And (playtest 2026-10-16 follow-up): every session is stamped with the
+// app build (CONFIG.build) and the summary is split per build; each tracked
+// hunt keeps a distance-to-signal sample every 5s ([seconds, metres, speed
+// dm/s] — still no coordinates), walking speed inside the search area, and
+// how the capture was reached (the CAPTURE NOW bar vs. the nav / scanner).
+//
 // Everything stays in localStorage on the device and is exported as JSON
 // from the Journal tab. Privacy (GDD §39): NO coordinates are ever stored
 // here — only distances, durations, counts and species/behaviour labels.
@@ -108,6 +114,7 @@ export function startSession(extra = {}) {
     lastActiveAt: now,
     endedAt: null,
     endReason: null,
+    build: CONFIG.build,     // app build this session ran on
     gpsFixMs: null,          // time from Start Hunting to first GPS fix
     firstCaptureMs: null,    // time from Start Hunting to first capture
     distanceM: 0,            // walked this session (implausible jumps ignored)
@@ -125,6 +132,10 @@ export function startSession(extra = {}) {
       captureScreenOutOfRange: 0, // opened the capture screen while it couldn't capture
       awayNudges: 0,              // "you're moving away" nudges
       autoRetargets: 0,           // game swapped to a closer signal
+      aheadSpawns: 0,             // signals placed ahead of a walking player
+      behindDespawns: 0,          // signals dropped because they were far behind a walker
+      aheadOffers: 0,             // "new signal ahead" offered after walking away from everything
+      slowDownPrompts: 0,         // "slow down" in the search area (walking through at pace)
     },
     headingMs: {},           // foreground time by heading source (course / compass / …)
     gpsAccuracyHist: {},     // tick counts by GPS accuracy bucket (≤5, ≤10, ≤20, ≤40, >40 m)
@@ -195,6 +206,14 @@ export function signalDetected(sig, distFromPlayerM) {
     colderWarnings: 0,
     captureReadyAt: null,    // first "in capture range" alert (accuracy-aware range)
     awayNudges: 0,
+    aheadSpawn: !!sig.aheadSpawn, // placed ahead of a walking player
+    aheadOffer: !!sig.aheadOffer, // the "new signal ahead" offer
+    slowDownPrompts: 0,
+    searchStoppedMs: 0,      // time spent (nearly) standing still inside the search area
+    _searchSpeeds: [],       // walking speed samples inside the search area (dm/s)
+    track: [],               // [secondsSinceFirstTracked, distM, speed dm/s] every ~5s while tracking
+    _lastSampleAt: 0,
+    captureVia: null,        // 'bar' (CAPTURE NOW bar) | 'nav' | 'scanner'
     gpsAccuracyAtClosestM: null,
     captureRangeAtClosestM: null,
     _acc: [],                // GPS accuracy samples while tracking (summarised at the end)
@@ -206,6 +225,7 @@ export function signalDetected(sig, distFromPlayerM) {
   hunts.set(sig.id, h);
   session.hunts.push(h);
   session.counts.detected += 1;
+  if (h.aheadSpawn) session.counts.aheadSpawns = (session.counts.aheadSpawns || 0) + 1;
   if (h.rarity === 'legendary') session.counts.legendaryEvents += 1;
 }
 
@@ -233,6 +253,8 @@ export function directionEvent(type, sigId) {
     if (h) h.awayNudges = (h.awayNudges || 0) + 1;
   } else if (type === 'retarget') {
     session.counts.autoRetargets = (session.counts.autoRetargets || 0) + 1;
+  } else if (type === 'offer') {
+    session.counts.aheadOffers = (session.counts.aheadOffers || 0) + 1;
   }
 }
 
@@ -271,13 +293,18 @@ export function searchEvent(type, sigId) {
   } else if (type === 'colder') {
     session.counts.colderWarnings = (session.counts.colderWarnings || 0) + 1;
     if (h) h.colderWarnings += 1;
+  } else if (type === 'slow-down') {
+    session.counts.slowDownPrompts = (session.counts.slowDownPrompts || 0) + 1;
+    if (h) h.slowDownPrompts = (h.slowDownPrompts || 0) + 1;
   }
 }
 
-export function signalCaptured(sigId) {
+/** `via`: how the player reached the Capture screen — 'bar' | 'nav' | 'scanner'. */
+export function signalCaptured(sigId, via = null) {
   if (!session) return;
   const h = hunts.get(sigId);
   const now = Date.now();
+  if (h) h.captureVia = via;
   session.counts.captured += 1;
   if (session.firstCaptureMs == null) session.firstCaptureMs = now - session.startedAt;
   if (h && !h.outcome) {
@@ -295,7 +322,8 @@ export function signalGone(sigId, reason) {
   const h = hunts.get(sigId);
   if (h && !h.outcome) {
     finaliseHunt(h, reason, Date.now(), session);
-    if (reason === 'left-behind' || reason === 'made-room') session.counts.leftBehind = (session.counts.leftBehind || 0) + 1;
+    if (reason === 'behind') session.counts.behindDespawns = (session.counts.behindDespawns || 0) + 1;
+    if (reason === 'left-behind' || reason === 'made-room' || reason === 'behind') session.counts.leftBehind = (session.counts.leftBehind || 0) + 1;
     else session.counts.faded += 1;
   }
   if (currentHuntId === sigId) currentHuntId = null;
@@ -320,6 +348,13 @@ function tidyHunt(h) {
     h.gpsAccuracyMedianM = median(h._acc.map(Math.round));
     delete h._acc;
   }
+  if (Array.isArray(h._searchSpeeds)) {
+    const m = median(h._searchSpeeds);
+    h.searchSpeedMedianMps = m == null ? null : m / 10;
+    delete h._searchSpeeds;
+  }
+  if (h.searchStoppedMs != null) h.searchStoppedMs = Math.round(h.searchStoppedMs);
+  delete h._lastSampleAt;
   return h;
 }
 
@@ -329,8 +364,9 @@ function tidyHunt(h) {
 
 /**
  * Called every game tick with the live signal list (distances computed).
- * ctx: { headingSource, accuracyM } — where the heading came from this tick
- * and the current GPS accuracy (metres).
+ * ctx: { headingSource, accuracyM, speedMps, searching } — where the heading
+ * came from this tick, the current GPS accuracy (metres), walking speed, and
+ * whether the tracked signal is in Search mode.
  */
 export function tick(signals, ctx = {}) {
   if (!session) return;
@@ -369,6 +405,21 @@ export function tick(signals, ctx = {}) {
       }
       if (d <= CONFIG.veryCloseM && !h.reachedVeryCloseAt) h.reachedVeryCloseAt = now;
       if (sig._canCapture && !h.reachedCaptureRangeAt) h.reachedCaptureRangeAt = now;
+      const speed = isFinite(ctx.speedMps) ? ctx.speedMps : null;
+      // Distance profile of the hunt, every ~5s (no coordinates).
+      if (dt > 0 && h.firstTrackedAt && now - (h._lastSampleAt || 0) >= CONFIG.huntSampleEveryMs) {
+        h._lastSampleAt = now;
+        h.track ||= [];
+        if (h.track.length < CONFIG.huntMaxSamples) {
+          h.track.push([Math.round((now - h.firstTrackedAt) / 1000), Math.round(d), speed == null ? null : Math.round(speed * 10)]);
+        }
+      }
+      // How players move inside the search area: do they stop and look?
+      if (ctx.searching && dt > 0 && speed != null) {
+        h._searchSpeeds ||= [];
+        if (h._searchSpeeds.length < 400) h._searchSpeeds.push(Math.round(speed * 10));
+        if (speed < CONFIG.stoppedSpeedMps) h.searchStoppedMs = (h.searchStoppedMs || 0) + dt;
+      }
     }
   }
   persist(false);
@@ -478,11 +529,43 @@ export function isFieldSession(s) {
   return s.activeMs >= FIELD_MIN_ACTIVE_MS && s.distanceM >= FIELD_MIN_DISTANCE_M;
 }
 
+/**
+ * Which build a session ran on. Sessions logged before builds were stamped
+ * are dated: the 2026-10-15 fixes went live that afternoon.
+ */
+export function sessionBuild(s) {
+  if (s.build) return s.build;
+  return s.startedAt < Date.UTC(2026, 9, 15, 13, 0) ? 'pre-2026-10-15' : '2026-10-15';
+}
+
+function buildBrief(sessions) {
+  const f = summaryFor(sessions);
+  const field = summaryFor(sessions.filter(isFieldSession));
+  return {
+    sessions: f.sessions,
+    fieldSessions: field.sessions,
+    fieldActiveMinutes: field.totalActiveMinutes,
+    fieldWalkedM: Math.round(sessions.filter(isFieldSession).reduce((t, s) => t + (s.distanceM || 0), 0)),
+    captured: f.signals.captured,
+    tracked: f.signals.tracked,
+    trackedToCapturedPct: f.signals.trackedToCapturedPct,
+    fieldCapturesPerActiveHour: field.perSession.capturesPerActiveHour,
+    searchAreaHunts: f.searchStage.huntsThatReachedSearchArea,
+    capturedAfterSearchArea: f.searchStage.capturedAfterReachingSearchArea,
+  };
+}
+
 /** Aggregate §50 metrics over every logged session (includes the live one). */
 export function summary() {
   const sessions = nonEmptySessions();
   const field = sessions.filter(isFieldSession);
   const out = summaryFor(sessions);
+  // Per build, so a new version's numbers aren't drowned out by old sessions.
+  const builds = [...new Set(sessions.map(sessionBuild))];
+  out.byBuild = Object.fromEntries(builds.map((b) => [b, buildBrief(sessions.filter((s) => sessionBuild(s) === b))]));
+  const cur = sessions.filter((s) => sessionBuild(s) === CONFIG.build);
+  out.currentBuild = { build: CONFIG.build, ...summaryFor(cur), fieldOnly: summaryFor(cur.filter(isFieldSession)) };
+  delete out.currentBuild.fieldOnly.fieldOnly;
   // Same core numbers, field sessions only — desk tests (short, barely
   // moving) drag the averages down and hide what happens outdoors.
   const f = summaryFor(field);
@@ -550,6 +633,11 @@ function summaryFor(sessions) {
       capturedAfterReachingSearchArea: captured.filter((h) => h.enteredSearchAreaAt).length,
       searchAreaEntries: sum((s) => s.counts.searchEntries),
       colderWarnings: sum((s) => s.counts.colderWarnings),
+      slowDownPrompts: sum((s) => s.counts.slowDownPrompts),
+      // Walking speed inside the search area, and how many hunts stopped (≥5s nearly still) to search.
+      medianSearchSpeedMps: (() => { const m = median(tracked.map((h) => h.searchSpeedMedianMps == null ? null : Math.round(h.searchSpeedMedianMps * 10))); return m == null ? null : m / 10; })(),
+      huntsThatStoppedInSearchArea: tracked.filter((h) => (h.searchStoppedMs || 0) >= 5000).length,
+      capturedAfterStopping: captured.filter((h) => (h.searchStoppedMs || 0) >= 5000).length,
     },
     abandonment: {
       trackedNotCaptured: trackedNotCaptured.length,
@@ -568,10 +656,15 @@ function summaryFor(sessions) {
       captureScreenOpensOutOfRange: sum((s) => s.counts.captureScreenOutOfRange),
       medianGpsAccuracyAtClosestM: median(tracked.map((h) => h.gpsAccuracyAtClosestM)),
       medianCaptureRangeAtClosestM: median(tracked.map((h) => h.captureRangeAtClosestM)),
+      captureVia: captured.reduce((o, h) => { const k = h.captureVia || 'unknown'; o[k] = (o[k] || 0) + 1; return o; }, {}),
     },
     direction: {
       awayNudges: sum((s) => s.counts.awayNudges),
       autoRetargets: sum((s) => s.counts.autoRetargets),
+      aheadOffers: sum((s) => s.counts.aheadOffers),
+      aheadSpawns: sum((s) => s.counts.aheadSpawns),
+      behindDespawns: sum((s) => s.counts.behindDespawns),
+      capturedFromAheadSpawns: captured.filter((h) => h.aheadSpawn).length,
       // Long hunts (walked > 50m) that still ended further away than they started.
       longHuntsEndedFurtherAway: tracked.filter((h) => h.outcome && h.walkedWhileTrackingM > 50 && h.lastDistM > h.detectedDistM).length,
       longHunts: tracked.filter((h) => h.outcome && h.walkedWhileTrackingM > 50).length,
@@ -606,6 +699,7 @@ export function exportBlobUrl() {
     kind: 'the-hunt-playtest-analytics',
     schema: SCHEMA,
     exportedAt: new Date().toISOString(),
+    build: CONFIG.build,
     device: {
       userAgent: navigator.userAgent,
       screen: `${screen.width}x${screen.height}`,
@@ -631,6 +725,12 @@ export function exportBlobUrl() {
         searchColderConfirmTicks: CONFIG.searchColderConfirmTicks,
         awayNudgeM: CONFIG.awayNudgeM,
         pausedBehaviours: CONFIG.pausedBehaviours,
+        captureRangeByRarity: CONFIG.captureRangeByRarity,
+        aheadConeHalfDeg: CONFIG.aheadConeHalfDeg,
+        behindAngleDeg: CONFIG.behindAngleDeg,
+        behindDespawnM: CONFIG.behindDespawnM,
+        aheadOfferM: `${CONFIG.aheadOfferMinM}-${CONFIG.aheadOfferMaxM}`,
+        searchSlowSpeedMps: CONFIG.searchSlowSpeedMps,
       },
     },
     privacy: 'No coordinates are recorded — only distances, durations, counts and species labels.',
@@ -648,6 +748,7 @@ export function exportBlobUrl() {
 function exportSession(s) {
   const copy = JSON.parse(JSON.stringify(s));
   copy.kind = isFieldSession(s) ? 'field' : 'desk';
+  copy.build = sessionBuild(s);
   if (s === session && !s.endedAt) {
     copy.endReason = 'exported-live';
     copy.lastActiveAt = Date.now();

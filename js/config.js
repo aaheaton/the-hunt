@@ -3,6 +3,11 @@
 // without hunting through logic files.
 
 export const CONFIG = {
+  // Build label stamped on every analytics session, so a playtest export can
+  // be split by version (playtest 2026-10-16: 40 of 43 exported sessions were
+  // from the previous build and swamped the one new field session).
+  build: '2026-10-16',
+
   // How far out a new signal can spawn from the player when a hunt starts.
   // Measured to the creature's true position.
   spawnMinDistanceM: 40,
@@ -37,6 +42,22 @@ export const CONFIG = {
   nearMaxSignals: 2,             // …topping up to 2 when short
   topUpRetryMs: 20 * 1000,       // wait this long after a failed top-up
 
+  // --- Spawning for walkers (playtest 2026-10-16: 1.4km walked at ~5.6km/h,
+  // 15 of 20 signals ended up behind the player and were never reached; one
+  // capture in the first minute, then nothing for 14 minutes) ---
+  // While walking (heading from the GPS track), top-up signals go AHEAD, in
+  // this cone around the direction of travel, widening if nothing fits.
+  aheadConeHalfDeg: 45,
+  aheadConeFallbackDeg: [75],
+  // A signal more than this many degrees off the direction of travel is
+  // "behind you": it doesn't count towards the guaranteed nearby signals…
+  behindAngleDeg: 120,
+  // …and once it's this far behind (and you're still walking away) it's
+  // dropped to make room for one ahead.
+  behindDespawnM: 150,
+  // A signal within this many degrees of the direction of travel is "ahead".
+  aheadAngleDeg: 90,
+
   // Signals survive short app restarts / reloads for this long.
   signalPersistMs: 30 * 60 * 1000,
 
@@ -70,6 +91,12 @@ export const CONFIG = {
   // distance the scanner still gives a rough 8-point direction ("TRY NE") so
   // players don't get lost. Closer than this it's pure hot/cold.
   searchHintAboveM: 15,
+  // Playtest 2026-10-16: 3 of 4 search-area entries were walked straight
+  // through (closest 20–28m) at walking pace. Entering the area now says
+  // STOP, and "colder" is only judged once the player has slowed below
+  // this speed — walking past at full pace gets "SLOW DOWN" instead.
+  searchSlowSpeedMps: 1.0,
+  searchSlowDownToastMs: 15 * 1000, // min gap between "slow down" prompts
 
   // Distance thresholds that change what the scanner shows.
   veryCloseM: 20,
@@ -77,6 +104,10 @@ export const CONFIG = {
   // players stood "on" a creature and still couldn't capture it). Effective
   // range = clamp(accuracy × factor, captureRangeM, captureRangeMaxM).
   captureRangeM: 12,
+  // Minimum capture range by rarity (playtest 2026-10-16: with a 4m GPS fix
+  // the range sat at 12m and three hunts died at 20–28m). Commons and
+  // uncommons are easier to pin down; rare and above keep the tight 12m.
+  captureRangeByRarity: { common: 18, uncommon: 18 },
   captureRangeMaxM: 20,
   captureAccuracyFactor: 1.0,
   // Once in range, stay capturable for this long even if GPS jitters out.
@@ -105,6 +136,26 @@ export const CONFIG = {
   // If the game picked the signal for you (not you) and you're walking away
   // from it, switch to a nearer one when it's at least this much closer.
   autoRetargetGainM: 20,
+  // Playtest 2026-10-16: 14 "moving away" nudges, 0 retargets — every signal
+  // was behind the player, so none was closer. Now, when you're walking away
+  // and nothing is ahead, a fresh signal is placed ahead of you (within this
+  // ring) and offered (auto-picked hunts switch to it straight away).
+  aheadOfferMinM: 50,
+  aheadOfferMaxM: 110,
+
+  // --- Analytics (playtest 2026-10-16 follow-up) ---
+  huntSampleEveryMs: 5000,      // distance-to-signal sample interval while tracking
+  huntMaxSamples: 360,          // 30 minutes at 5s
+  stoppedSpeedMps: 0.5,         // "standing still / searching" below this
+
+  // --- Daily hunt (GDD §21) — gives commons a reason to be chased ---
+  dailyGoals: [
+    { id: 'catch-3', text: 'Catch 3 creatures', target: 3 },
+    { id: 'commons-2', text: 'Catch 2 common creatures', target: 2, rarity: 'common' },
+    { id: 'new-1', text: 'Catch a species you’ve never caught', target: 1, firstOnly: true },
+    { id: 'water-1', text: 'Catch a waterside creature', target: 1, habitat: 'water' },
+    { id: 'trees-2', text: 'Catch 2 creatures in parks or trees', target: 2, habitat: 'trees' },
+  ],
 
   // Behaviours paused for now (playtest 2026-10-15: 0% capture rate, and even
   // stationary creatures were only caught 2% of the time). Species with these
@@ -194,5 +245,6 @@ export const CONFIG = {
     safetySeen: 'thehunt_safety_seen_v1',
     lifetimeDistanceM: 'thehunt_lifetime_distance_v1',
     terrainIndex: 'thehunt_terrain_index_v1',
+    dailyDone: 'thehunt_daily_done_v1',
   },
 };

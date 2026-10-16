@@ -14,7 +14,7 @@
 
 import { CONFIG } from './config.js';
 import { rollSpecies, spawnableSpecies, speciesById } from './characters.js';
-import { destinationPoint, distanceM } from './geo.js';
+import { destinationPoint, distanceM, bearingDeg, angleDiff } from './geo.js';
 import { findSpawnPoint, findPointNear, habitatsNear, terrainStatus, isSafeSpot } from './terrain.js';
 
 // Ids must stay unique across reloads, because signals are persisted.
@@ -203,16 +203,73 @@ export function rollSignalTarget() {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
+/* ------------------------------------------------------------------ */
+/* Walking: spawn ahead, treat signals behind as gone (playtest 10-16)  */
+/* ------------------------------------------------------------------ */
+
+/** Degrees between the direction of travel and the signal (0 = dead ahead). */
+function offHeadingDeg(playerPos, heading, sig) {
+  return Math.abs(angleDiff(heading, bearingDeg(playerPos, sig.pos)));
+}
+
+/** Is the signal behind a walking player? (`heading` null = not walking → never.) */
+export function isBehind(playerPos, heading, sig) {
+  if (heading == null || !isFinite(heading)) return false;
+  return offHeadingDeg(playerPos, heading, sig) > CONFIG.behindAngleDeg;
+}
+
+/** Is the signal roughly ahead of a walking player? (Not walking → everything counts.) */
+export function isAhead(playerPos, heading, sig) {
+  if (heading == null || !isFinite(heading)) return true;
+  return offHeadingDeg(playerPos, heading, sig) <= CONFIG.aheadAngleDeg;
+}
+
+/** Cones around the direction of travel, narrowest first, then any direction. */
+function aheadCones(heading) {
+  if (heading == null || !isFinite(heading)) return [null];
+  return [CONFIG.aheadConeHalfDeg, ...CONFIG.aheadConeFallbackDeg]
+    .map((halfDeg) => ({ centerDeg: heading, halfDeg }))
+    .concat([null]);
+}
+
+/**
+ * spawnSignal, but while walking (ctx.heading set) try the cone ahead of the
+ * player first. Marks the signal `aheadSpawn` when it landed in a cone.
+ */
+function spawnPreferAhead(playerPos, ctx) {
+  for (const cone of aheadCones(ctx.heading)) {
+    const sig = spawnSignal(playerPos, { ...ctx, cone });
+    if (sig) { if (cone) sig.aheadSpawn = true; return sig; }
+  }
+  return null;
+}
+
+/**
+ * Pick a signal to drop when the list is full: one behind a walking player
+ * first, otherwise the furthest. Never the tracked one or a legendary.
+ */
+function pickVictim(activeSignals, playerPos, ctx) {
+  return activeSignals
+    .filter((s) => s.id !== ctx.currentId && !s.legendary)
+    .sort((a, b) => {
+      const ba = isBehind(playerPos, ctx.heading, a) ? 1 : 0;
+      const bb = isBehind(playerPos, ctx.heading, b) ? 1 : 0;
+      if (ba !== bb) return bb - ba;
+      return distanceM(playerPos, b.pos) - distanceM(playerPos, a.pos);
+    })[0] || null;
+}
+
 /**
  * Top up the active signal list to `ctx.target` (rolled by the caller so it
- * doesn't change every tick). Returns the newly-added signals.
+ * doesn't change every tick). While walking (ctx.heading) new signals go
+ * ahead of the player. Returns the newly-added signals.
  */
 export function refillSignals(activeSignals, playerPos, ctx = {}) {
   const target = ctx.target ?? rollSignalTarget();
   const added = [];
   let failures = 0;
   while (activeSignals.length < target && failures < 4) {
-    const sig = spawnSignal(playerPos, { ...ctx, existing: activeSignals });
+    const sig = spawnPreferAhead(playerPos, { ...ctx, existing: activeSignals });
     if (!sig) { failures++; continue; }
     activeSignals.push(sig);
     added.push(sig);
@@ -221,21 +278,25 @@ export function refillSignals(activeSignals, playerPos, ctx = {}) {
 }
 
 /**
- * Keep 1–2 signals within CONFIG.nearRadiusM of the player. When none are
- * that close, spawn up to a random 1–2 in the 40–150m ring. If the list is
- * already at its maximum, the furthest signal that isn't being tracked (and
- * isn't a legendary) makes room. Returns { added, removed }.
+ * Keep CONFIG.nearMinSignals signals within CONFIG.nearRadiusM of the player.
+ * While walking, signals behind the player don't count (playtest 2026-10-16:
+ * a signal 95m behind a walker still counted as "near", so nothing new was
+ * placed ahead) and new ones go ahead. If the list is already at its
+ * maximum, a signal behind (else the furthest) makes room — never the
+ * tracked one or a legendary. Returns { added, removed }.
  */
 export function ensureNearSignals(activeSignals, playerPos, ctx = {}) {
   const added = [];
   const removed = [];
-  const near = activeSignals.filter((s) => distanceM(playerPos, s.pos) <= CONFIG.nearRadiusM).length;
+  const near = activeSignals.filter((s) =>
+    distanceM(playerPos, s.pos) <= CONFIG.nearRadiusM && !isBehind(playerPos, ctx.heading, s)
+  ).length;
   if (near >= CONFIG.nearMinSignals) return { added, removed };
 
   const { nearMinSignals: min, nearMaxSignals: max } = CONFIG;
   const want = min + Math.floor(Math.random() * (max - min + 1)) - near;
   for (let i = 0; i < want; i++) {
-    const sig = spawnSignal(playerPos, {
+    const sig = spawnPreferAhead(playerPos, {
       ...ctx,
       existing: activeSignals,
       minD: CONFIG.spawnMinDistanceM,
@@ -244,9 +305,7 @@ export function ensureNearSignals(activeSignals, playerPos, ctx = {}) {
     });
     if (!sig) break;
     if (activeSignals.length >= CONFIG.maxActiveSignals) {
-      const victim = activeSignals
-        .filter((s) => s.id !== ctx.currentId && !s.legendary)
-        .sort((a, b) => distanceM(playerPos, b.pos) - distanceM(playerPos, a.pos))[0];
+      const victim = pickVictim(activeSignals, playerPos, ctx);
       if (!victim) break;
       activeSignals.splice(activeSignals.indexOf(victim), 1);
       removed.push(victim);
@@ -255,6 +314,52 @@ export function ensureNearSignals(activeSignals, playerPos, ctx = {}) {
     added.push(sig);
   }
   return { added, removed };
+}
+
+/**
+ * Walking away from everything: place one fresh signal ahead of the player
+ * (CONFIG.aheadOfferMinM–MaxM, in the cone of travel), making room if the
+ * list is full. Returns { sig, removed } — sig is null if nowhere fits.
+ */
+export function spawnAheadOffer(activeSignals, playerPos, ctx = {}) {
+  const removed = [];
+  if (ctx.heading == null) return { sig: null, removed };
+  let sig = null;
+  for (const cone of aheadCones(ctx.heading).filter(Boolean)) {
+    sig = spawnSignal(playerPos, {
+      ...ctx, existing: activeSignals, cone, noLegendary: true,
+      minD: CONFIG.aheadOfferMinM, maxD: CONFIG.aheadOfferMaxM,
+    });
+    if (sig) break;
+  }
+  if (!sig) return { sig: null, removed };
+  sig.aheadSpawn = true;
+  sig.aheadOffer = true;
+  if (activeSignals.length >= CONFIG.maxActiveSignals) {
+    const victim = pickVictim(activeSignals, playerPos, ctx);
+    if (victim) {
+      activeSignals.splice(activeSignals.indexOf(victim), 1);
+      removed.push(victim);
+    }
+  }
+  activeSignals.push(sig);
+  return { sig, removed };
+}
+
+/**
+ * While walking, drop signals more than CONFIG.behindDespawnM behind the
+ * player (not the tracked one, not legendaries) so the slots go to signals
+ * ahead. Returns the removed signals.
+ */
+export function despawnBehindSignals(activeSignals, playerPos, ctx = {}) {
+  if (ctx.heading == null) return [];
+  const gone = activeSignals.filter((s) =>
+    s.id !== ctx.currentId && !s.legendary &&
+    distanceM(playerPos, s.pos) > CONFIG.behindDespawnM &&
+    isBehind(playerPos, ctx.heading, s)
+  );
+  for (const s of gone) activeSignals.splice(activeSignals.indexOf(s), 1);
+  return gone;
 }
 
 /** Remove (and return) signals the player has left more than CONFIG.despawnDistanceM behind. */

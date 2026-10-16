@@ -328,3 +328,51 @@ last 30 metres and on direction, not on detection.
 
 The metric to watch next: **tracked → captured for common creatures** (2% in
 this playtest). Target: above 50%.
+
+## Playtest fixes (updated 2026-10-16)
+
+From the 2026-10-16 export (one 15-minute, 1.4km field walk on the 10-15
+build): one capture in the first minute, then nothing for 14 minutes. The
+player walked a route at ~5.6km/h, 15 of 20 signals ended up behind them,
+and 3 of 4 search-area entries were walked straight through at 20–28m.
+All new values are in `js/config.js`.
+
+- **Spawn ahead of walkers.** While the heading comes from the GPS track
+  (i.e. you're walking), top-ups go in a ±45° cone ahead (widening to ±75°,
+  then any direction). Signals more than 120° off your direction of travel
+  don't count as "nearby", and once they're 150m behind they're dropped so
+  the slot goes to one ahead (`aheadConeHalfDeg`, `behindAngleDeg`,
+  `behindDespawnM`). The tracked signal and legendaries are never dropped.
+- **Walking away → a signal ahead.** The "moving away" check now looks for
+  a signal *ahead*. If none exists, a fresh one is placed 50–110m ahead.
+  Game-picked hunts switch to it; hunts you picked get a **tappable toast**
+  ("NEW SIGNAL 80m AHEAD — TAP TO SWITCH"). After a capture, the next
+  auto-picked signal is the nearest one ahead.
+- **Search stage for walkers.** Entering the search area gives a long
+  buzz and "■ STOP — IT'S HERE". While you're still moving faster than
+  1 m/s there are no hot/cold verdicts, just a "SLOW DOWN" prompt (at most
+  every 15s). On the Map and Journal, an orange **"STOP — SEARCH AREA"** bar
+  appears above the nav and opens the Scanner; it turns into the green CAPTURE
+  NOW bar in range.
+- **Capture range by rarity.** Common and uncommon creatures can be caught
+  from 18m (`captureRangeByRarity`); rare and above keep 12m. GPS-accuracy
+  widening (max 20m) still applies.
+- **NEW SPECIES tags** on Scanner contacts and Map cards for species you've
+  never caught.
+- **Daily hunt** (GDD §21): one goal per day (e.g. "Catch 2 common
+  creatures"), shown on the Map and Journal; a toast when it's done. Goals
+  live in `CONFIG.dailyGoals`.
+- **Capture screen scan view.** Out of range, the Capture screen shows an
+  arrow, distance and signal meter (search heat and a rough direction
+  inside the search area) instead of a dead end.
+- **Analytics.** Every session is stamped with `CONFIG.build`; the export
+  has `summary.byBuild` and `summary.currentBuild` so old sessions no longer
+  swamp new ones (older sessions are labelled `pre-2026-10-15` /
+  `2026-10-15` by date). Each tracked hunt keeps `track`: a sample every 5s
+  of `[seconds, metres to signal, speed in dm/s]` (no coordinates); plus
+  `searchSpeedMedianMps`, `searchStoppedMs`, `slowDownPrompts`, `aheadSpawn`
+  / `aheadOffer` and `captureVia` (`bar` | `nav` | `scanner`). New counters:
+  `aheadSpawns`, `behindDespawns`, `aheadOffers`, `slowDownPrompts`.
+  **Bump `CONFIG.build` whenever you ship a change you want to measure.**
+- SW cache v15. Backup of the pre-change files:
+  `Hunt_C/_backup-before-playtest-fixes-2026-10-16/`.

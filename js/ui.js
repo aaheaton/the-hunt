@@ -6,6 +6,7 @@ import { RARITY, SPECIES, speciesById, formFor, maxStage } from './characters.js
 import { renderLiveMap } from './livemap.js';
 import { isSearching, temperatureFor, searchHeat, roughDirection } from './search.js';
 import { getCollection, getJournal, hunterLevel, totalDiscoveredSpeciesCount, evolutionStatus } from './storage.js';
+import { angleDiff } from './geo.js';
 
 const screens = {
   safety: document.getElementById('screen-safety'),
@@ -114,11 +115,14 @@ let toastTimer = null;
 /**
  * Short event notification (runner fled, signal hidden, terrain status…).
  * kind: info | alert | warn | legendary. ms: 0 = stay until replaced/hidden.
+ * onTap: optional action when the toast is tapped (e.g. "switch to the new
+ * signal ahead"); the toast closes after the tap.
  */
-export function showToast(text, { ms = 3500, kind = 'info' } = {}) {
+export function showToast(text, { ms = 3500, kind = 'info', onTap = null } = {}) {
   const el = document.getElementById('event-toast');
   el.textContent = text;
-  el.className = `event-toast kind-${kind}`;
+  el.className = `event-toast kind-${kind}${onTap ? ' tappable' : ''}`;
+  el.onclick = onTap ? () => { hideToast(); onTap(); } : null;
   // Restart the entrance animation.
   void el.offsetWidth;
   el.classList.add('show');
@@ -128,7 +132,9 @@ export function showToast(text, { ms = 3500, kind = 'info' } = {}) {
 
 export function hideToast() {
   clearTimeout(toastTimer);
-  document.getElementById('event-toast').classList.add('hidden');
+  const el = document.getElementById('event-toast');
+  el.classList.add('hidden');
+  el.onclick = null;
 }
 
 export function setNightMode(night) {
@@ -188,6 +194,25 @@ export function searchPulse(intervalMs) {
   el.classList.add('go');
 }
 
+/** Species ids already in the collection (read once per render). */
+function collectedIds() {
+  return new Set(Object.keys(getCollection()));
+}
+
+/** "NEW" tag for a signal whose species has never been caught. */
+function newTagHtml(sig, collected) {
+  return collected.has(sig.speciesId) ? '' : '<span class="new-species-tag">NEW</span>';
+}
+
+/** "AHEAD" / "BEHIND YOU" / "TO YOUR LEFT"… relative to the heading, or a rough compass point. */
+function relDirText(bearing, heading) {
+  if (heading == null || !isFinite(heading)) return `TO THE ${roughDirection(bearing, true)}`;
+  const rel = angleDiff(heading, bearing);
+  if (Math.abs(rel) <= 35) return 'AHEAD OF YOU';
+  if (Math.abs(rel) >= 145) return 'BEHIND YOU';
+  return rel > 0 ? 'TO YOUR RIGHT' : 'TO YOUR LEFT';
+}
+
 function signalStrengthRatio(distanceM) {
   return Math.max(0, Math.min(1, 1 - distanceM / CONFIG.scannerRangeM));
 }
@@ -214,7 +239,9 @@ export function renderScannerScreen(signals, currentId, heading) {
     headlineEl.textContent = current.legendary ? `★ ${current.revealedClues.length ? name : 'LEGENDARY SIGNAL'} ★` : name;
     subEl.textContent = current.legendary && current.expiresAt
       ? `Legendary signal — fades in ${fmtCountdown(current.expiresAt - Date.now())}`
-      : 'Approx. vector triangulation active';
+      : !collectedIds().has(current.speciesId)
+        ? 'NEW SPECIES — you have never caught one of these'
+        : 'Approx. vector triangulation active';
     const inRange = current._distanceM <= CONFIG.scannerRangeM;
     rangeEl.textContent = isSearching(current) ? '◎ SEARCH AREA' : inRange ? '● IN RANGE' : '○ OUT OF RANGE';
     freqEl.textContent = hideMetres(current) ? '| FREQ: SCATTERED' : `| FREQ: ${(100 + current._distanceM * 0.4).toFixed(1)} MHz`;
@@ -245,6 +272,7 @@ export function renderScannerScreen(signals, currentId, heading) {
   document.getElementById('contacts-count').textContent = `${signals.length} ACTIVE`;
   const tabsEl = document.getElementById('contact-tabs');
   tabsEl.innerHTML = '';
+  const collected = collectedIds();
   sorted.forEach((sig, i) => {
     const species = speciesById(sig.speciesId);
     const known = sig.revealedClues.length > 0;
@@ -253,7 +281,7 @@ export function renderScannerScreen(signals, currentId, heading) {
     btn.innerHTML = `
       <div class="row1">
         <span class="sig-id" style="color:${rarityVar(species.rarity)}">SIG-${String.fromCharCode(65 + i)}</span>
-        <span class="dot" style="background:${rarityVar(species.rarity)}"></span>
+        ${newTagHtml(sig, collected) || `<span class="dot" style="background:${rarityVar(species.rarity)}"></span>`}
       </div>
       <div class="dist">${distText(sig)}</div>
       <div class="rarity-label" style="color:${rarityVar(species.rarity)}">${known ? species.name.toUpperCase() : RARITY[species.rarity].label.toUpperCase()}</div>
@@ -439,6 +467,7 @@ export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetim
   cardsEl.innerHTML = '';
   const nearest = [...visible].sort((a, b) => a._distanceM - b._distanceM).slice(0, 2);
   const positions = ['top:80px;left:10px;', 'bottom:52px;right:10px;'];
+  const collected = collectedIds();
   nearest.forEach((sig, i) => {
     const species = speciesById(sig.speciesId);
     const card = document.createElement('div');
@@ -447,6 +476,7 @@ export function renderMap(signals, playerPos, heading, sessionDistanceM, lifetim
     card.innerHTML = `
       <div class="zc-top">
         <span class="zc-badge" style="background:rgba(255,255,255,0.08);color:${getComputedColorForRarity(species.rarity)}">${RARITY[species.rarity].label.toUpperCase()}</span>
+        ${collected.has(sig.speciesId) ? '' : '<span class="new-species-tag">NEW SPECIES</span>'}
       </div>
       <div class="zc-name">${sig._hidden ? 'Signal lost' : sig.legendary ? '★ Legendary Signal' : sig.revealedClues.length ? species.name : 'Unknown Zone'}</div>
       <div class="zc-sub">${distText(sig)} • ${sig.unchecked ? 'unverified terrain' : HABITAT_SHORT[sig.habitat] || 'search zone'} • ±${CONFIG.searchZoneRadiusM}m</div>
@@ -479,7 +509,8 @@ function getComputedColorForRarity(rarity) {
 /* Capture / AR screen                                                  */
 /* ------------------------------------------------------------------ */
 
-export function renderCaptureScreen(sig, usingFallback) {
+export function renderCaptureScreen(sig, usingFallback, heading = null) {
+  renderScanPanel(sig, heading);
   const noTarget = document.getElementById('ar-no-target');
   const targetEl = document.getElementById('ar-target');
   const metaCard = document.getElementById('ar-meta-card');
@@ -547,7 +578,7 @@ export function renderCaptureScreen(sig, usingFallback) {
       ? `${sig.search.trend === 'colder' ? '❄ COLDER — ' : ''}${temp.label} — NOT IN RANGE YET, KEEP SEARCHING`
       : sig._distanceM <= CONFIG.veryCloseM
         ? `TARGET VERY CLOSE — ${Math.round(sig._distanceM)}m (CAPTURE AT ${range}m)`
-        : `SIGNAL TOO FAINT TO CAPTURE — ${Math.round(sig._distanceM)}m AWAY. FOLLOW THE SCANNER, THEN COME BACK`;
+        : `SCAN MODE — ${Math.round(sig._distanceM)}m AWAY. FOLLOW THE ARROW; CAPTURE UNLOCKS AT ${range}m`;
 
   captureBtn.disabled = !inRange;
   captureBtn.classList.toggle('ready-pulse', inRange);
@@ -557,18 +588,77 @@ export function renderCaptureScreen(sig, usingFallback) {
 }
 
 /**
- * "CAPTURE NOW" bar shown above the nav on every screen except Capture,
- * whenever the tracked signal is in capture range.
+ * Out of range on the Capture screen: instead of a dead end, show a scan
+ * view — direction + distance on the way in, search heat inside the search
+ * area (playtest 2026-10-16: the capture screen was opened 3× out of range,
+ * used to "look for" the creature).
+ */
+function renderScanPanel(sig, heading) {
+  const panel = document.getElementById('ar-scan-panel');
+  if (!panel) return;
+  const show = !!sig && !sig._hidden && !sig._canCapture;
+  panel.classList.toggle('hidden', !show);
+  if (!show) return;
+  const range = sig._captureRangeM || CONFIG.captureRangeM;
+  const searching = isSearching(sig);
+  const hide = hideMetres(sig);
+  const arrow = document.getElementById('scan-arrow');
+  const exactDir = !hide || sig._distanceM > CONFIG.searchHintAboveM;
+  arrow.classList.toggle('hidden', !exactDir);
+  if (exactDir) {
+    const rel = heading == null ? sig._bearingDeg : ((sig._bearingDeg - heading + 360) % 360);
+    // While searching only a rough 8-point direction, so snap to 45°.
+    const shown = hide ? Math.round(rel / 45) * 45 : rel;
+    arrow.style.transform = `rotate(${shown}deg)`;
+  }
+  const temp = searching ? temperatureFor(sig._distanceM, range) : null;
+  document.getElementById('scan-main').textContent = hide ? temp.label : `${Math.round(sig._distanceM)}m`;
+  document.getElementById('scan-dir').textContent = hide
+    ? (exactDir ? `ROUGHLY ${relDirText(sig._bearingDeg, heading)} — MOVE SLOWLY` : 'RIGHT AROUND YOU — TURN SLOWLY, FOLLOW THE PULSES')
+    : relDirText(sig._bearingDeg, heading);
+  const heat = searching ? searchHeat(sig._distanceM, range) : signalStrengthRatio(sig._distanceM);
+  const segs = Math.round(heat * 8);
+  document.getElementById('scan-heat-label').textContent = searching ? 'SEARCH HEAT' : 'SIGNAL';
+  document.getElementById('scan-heat').innerHTML = Array.from({ length: 8 })
+    .map((_, i) => `<div class="seg${i < segs ? ' on' : ''}"></div>`).join('');
+  panel.dataset.temp = temp ? (sig.search?.trend === 'colder' ? 'cold' : temp.id) : '';
+}
+
+/**
+ * Bar above the nav on every screen except Capture:
+ *  • "CAPTURE NOW" whenever the tracked signal is in capture range;
+ *  • "STOP — SEARCH AREA" while searching but not yet in range (playtest
+ *    2026-10-16: 85% of time was on the Map, and players walked straight
+ *    through search areas). Not on the Scanner, which shows it already.
  */
 export function renderCaptureReady(sig, screen) {
   const bar = document.getElementById('capture-ready-bar');
   if (!bar) return;
-  const show = !!sig && !!sig._canCapture && screen !== 'capture' && screen !== 'safety';
-  bar.classList.toggle('hidden', !show);
-  if (show) {
+  const onScreen = screen !== 'capture' && screen !== 'safety';
+  const ready = !!sig && !!sig._canCapture && onScreen;
+  const search = !ready && !!sig && isSearching(sig) && onScreen && screen !== 'scanner';
+  bar.classList.toggle('hidden', !ready && !search);
+  bar.classList.toggle('search-mode', search);
+  if (ready) {
     const species = speciesById(sig.speciesId);
     const name = sig.revealedClues.length ? species.name.toUpperCase() : 'SIGNAL';
     document.getElementById('capture-ready-text').textContent = `${name} IN CAPTURE RANGE — CAPTURE NOW`;
+  } else if (search) {
+    const temp = temperatureFor(sig._distanceM, sig._captureRangeM);
+    document.getElementById('capture-ready-text').textContent = `■ STOP — SEARCH AREA (${temp.short}) · OPEN SCANNER`;
+  }
+}
+
+/** Today's daily hunt strip (Map + Journal). */
+export function renderDailyGoal(p) {
+  for (const el of document.querySelectorAll('.daily-goal')) {
+    if (!p) { el.classList.add('hidden'); continue; }
+    el.classList.remove('hidden');
+    el.classList.toggle('done', p.done);
+    el.innerHTML = `
+      <span class="dg-label">DAILY HUNT</span>
+      <span class="dg-text">${p.done ? '✔ ' : ''}${p.goal.text}</span>
+      <span class="dg-count">${p.count}/${p.target}</span>`;
   }
 }
 
@@ -822,15 +912,19 @@ export function renderPlaytestStats(sum) {
     tile(sum.perSession.capturesPerActiveHour ?? '—', 'Captures / Hour'),
   ].join('');
 
+  const cb = sum.byBuild?.[sum.currentBuild?.build];
+  const buildNote = cb
+    ? `<p class="muted pt-note">This build (${sum.currentBuild.build}): ${cb.fieldSessions} field session${cb.fieldSessions === 1 ? '' : 's'}, ${cb.captured} caught of ${cb.tracked} tracked${cb.fieldCapturesPerActiveHour != null ? `, ${cb.fieldCapturesPerActiveHour}/hour outdoors` : ''}.</p>`
+    : '';
   const ab = sum.abandonment;
   const wrap = document.getElementById('playtest-abandon');
   if (!ab.trackedNotCaptured) {
-    wrap.innerHTML = `<p class="muted pt-note">No abandoned hunts logged yet.</p>`;
+    wrap.innerHTML = `${buildNote}<p class="muted pt-note">No abandoned hunts logged yet.</p>`;
     return;
   }
   const max = Math.max(...Object.values(ab.byClosestStageReached), 1);
   const order = ['distant', 'far', 'mid', 'close', 'very-close', 'capture-range'];
-  wrap.innerHTML = `
+  wrap.innerHTML = `${buildNote}
     <div class="label-caps muted pt-sub">WHERE HUNTS WERE ABANDONED (${ab.trackedNotCaptured}) · CLOSEST REACHED</div>
     ${order.map((k) => {
       const n = ab.byClosestStageReached[k] || 0;

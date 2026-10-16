@@ -20,14 +20,16 @@ import { CONFIG } from './config.js';
 const EMA_ALPHA = 0.45;
 
 /**
- * Effective capture range (m) for the current GPS accuracy. A ±15m fix can't
- * resolve a 12m circle, so the range widens with the reported accuracy, up to
- * CONFIG.captureRangeMaxM.
+ * Effective capture range (m) for the current GPS accuracy and the creature's
+ * rarity. A ±15m fix can't resolve a 12m circle, so the range widens with the
+ * reported accuracy, up to CONFIG.captureRangeMaxM. Commons and uncommons
+ * have a wider minimum (CONFIG.captureRangeByRarity — playtest 2026-10-16:
+ * three hunts died at 20–28m with a 4m fix and a 12m range).
  */
-export function captureRangeFor(accuracyM) {
-  const base = CONFIG.captureRangeM;
+export function captureRangeFor(accuracyM, rarity = null) {
+  const base = Math.max(CONFIG.captureRangeM, (rarity && CONFIG.captureRangeByRarity?.[rarity]) || 0);
   if (!isFinite(accuracyM) || accuracyM <= 0) return base;
-  return Math.round(Math.min(CONFIG.captureRangeMaxM, Math.max(base, accuracyM * CONFIG.captureAccuracyFactor)));
+  return Math.round(Math.min(Math.max(base, CONFIG.captureRangeMaxM), Math.max(base, accuracyM * CONFIG.captureAccuracyFactor)));
 }
 
 /** Temperature band for a distance inside the search area. */
@@ -77,12 +79,18 @@ export function resetSearch(sig) {
 /**
  * Advance search state for the tracked signal. Call once per tick after
  * sig._distanceM is computed.
- * @returns {Array<{type: 'entered'|'left'|'warmer'|'colder'}>}
+ * ctx.speedMps: the player's current walking speed. "Colder" is only judged
+ * once they've slowed below CONFIG.searchSlowSpeedMps; walking through the
+ * area at full pace gives a (throttled) 'slow-down' event instead
+ * (playtest 2026-10-16).
+ * @returns {Array<{type: 'entered'|'left'|'warmer'|'colder'|'slow-down'}>}
  */
-export function updateSearch(sig, now = Date.now()) {
+export function updateSearch(sig, now = Date.now(), ctx = {}) {
   const events = [];
   if (!sig || sig._hidden || !isFinite(sig._distanceM)) return events;
-  const st = (sig.search ||= { inZone: false, ema: null, ref: null, trend: null, lastColdAt: 0, entries: 0, coldStreak: 0 });
+  const st = (sig.search ||= { inZone: false, ema: null, ref: null, trend: null, lastColdAt: 0, entries: 0, coldStreak: 0, lastSlowAt: 0 });
+  const speed = isFinite(ctx.speedMps) ? ctx.speedMps : null;
+  const fast = speed != null && speed > CONFIG.searchSlowSpeedMps;
   const raw = sig._distanceM;
   st.ema = st.ema == null ? raw : st.ema + EMA_ALPHA * (raw - st.ema);
   const d = st.ema;
@@ -96,6 +104,7 @@ export function updateSearch(sig, now = Date.now()) {
       st.ref = raw;
       st.trend = null;
       st.coldStreak = 0;
+      st.lastSlowAt = now; // the entry alert already says STOP
       events.push({ type: 'entered' });
     }
     return events;
@@ -106,6 +115,17 @@ export function updateSearch(sig, now = Date.now()) {
     st.trend = null;
     st.coldStreak = 0;
     events.push({ type: 'left' });
+    return events;
+  }
+
+  if (fast && !sig._canCapture) {
+    // Still walking at pace: no hot/cold verdicts yet, just "slow down".
+    st.coldStreak = 0;
+    if (d < st.ref) st.ref = d;
+    if (now - (st.lastSlowAt || 0) >= CONFIG.searchSlowDownToastMs) {
+      st.lastSlowAt = now;
+      events.push({ type: 'slow-down' });
+    }
     return events;
   }
 
